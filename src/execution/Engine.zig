@@ -2,36 +2,71 @@
 const std = @import("std");
 const RawClassFile = @import("../class-loading/root.zig").RawClassFile;
 const Driver = @import("Driver.zig");
+const Class = @import("rt/Class.zig");
 const decoder = @import("decoder.zig");
 
 const Instr = decoder.Instr;
 const Self = @This();
 
-const Frame = struct {
-    stack: []u64,
-    stack_size: usize = 0,
+allocator: std.mem.Allocator,
+methods_call_stack: Stack(MethodFrame, METHODS_STACK_LIMIT),
+exec_stack: Stack(u64, EXECUTION_STACK_LIMIT), // TODO: Maybe this stack should be local to the method
+
+pub const METHODS_STACK_LIMIT = 1024; // measured in function calls
+pub const EXECUTION_STACK_LIMIT = 1024; // measured in values
+
+const MethodFrame = struct {
     locals: []u64,
     pc: usize,
-    code: []const u8,
-    // constant_pool: []RuntimeConstantPoolEntry, // TODO: Implement
-    constant_pool: []const RawClassFile.CPInfo, // for now
+    this: *Class,
 };
 
-pub const STACK_LIMIT = 1024; // measured in function calls
+fn Stack(comptime T: type, comptime N: usize) type {
+    return struct {
+        data: [N]T = undefined,
+        size: usize = 0,
 
-allocator: std.mem.Allocator,
-call_stack: [STACK_LIMIT]Frame,
-next_call_stack_idx: usize = 0,
+        const StackSelf = @This();
+
+        pub fn push(self: *StackSelf, value: T) void {
+            std.debug.assert(self.size < N);
+            self.data[self.size] = value;
+            self.size += 1;
+        }
+
+        pub fn pop(self: *StackSelf) T {
+            std.debug.assert(self.size != 0);
+            self.size -= 1;
+            return self.data[self.size];
+        }
+
+        pub fn empty(self: *StackSelf) bool {
+            return self.size == 0;
+        }
+
+        pub fn top(self: *StackSelf) *T {
+            std.debug.assert(self.size != 0);
+            return &self.data[self.size - 1];
+        }
+    };
+}
 
 pub fn init(allocator: std.mem.Allocator) Self {
     return Self{
         .allocator = allocator,
-        .call_stack = undefined,
+        .methods_call_stack = Stack(MethodFrame, METHODS_STACK_LIMIT){},
+        .exec_stack = Stack(u64, EXECUTION_STACK_LIMIT){},
     };
 }
 
 pub fn deinit(self: *Self) void {
-    _ = self; // TODO: Free call stack
+    while (!self.methods_call_stack.empty()) {
+        self.leaveMethod();
+    }
+
+    while (!self.exec_stack.empty()) {
+        _ = self.exec_stack.pop();
+    }
 }
 
 fn extract_method_code(method: RawClassFile.MethodInfo) ?RawClassFile.CodeAttribute {
@@ -49,66 +84,80 @@ fn extract_method_code(method: RawClassFile.MethodInfo) ?RawClassFile.CodeAttrib
 }
 
 // TODO: Eliminate allocations. They spread errors over calling code
-fn enterMethod(self: *Self, cf: *RawClassFile, code: RawClassFile.CodeAttribute) !void {
-    if (self.next_call_stack_idx >= STACK_LIMIT) {
-        // TODO: throw StackOverflowError
-        std.debug.panic("Stack overflow", .{});
-    }
+fn enterMethod(self: *Self, class: *Class, code: RawClassFile.CodeAttribute) !void {
     std.log.debug("\tmethod with max_stack {d} and max_locals {d}", .{ code.max_stack, code.max_locals });
-    self.call_stack[self.next_call_stack_idx] = Frame{
-        .stack = try self.allocator.alloc(u64, code.max_stack),
+    self.methods_call_stack.push(MethodFrame{
         .locals = try self.allocator.alloc(u64, code.max_locals),
         .pc = 0,
-        .code = code.code,
-        .constant_pool = cf.constant_pool,
-    };
-    self.next_call_stack_idx += 1;
+        .this = class,
+    });
 }
 
 fn leaveMethod(self: *Self) void {
-    if (self.next_call_stack_idx == 0) {
-        std.debug.panic("Stack underflow", .{});
-    }
-    self.next_call_stack_idx -= 1;
-    self.allocator.free(self.call_stack[self.next_call_stack_idx].stack);
-    self.allocator.free(self.call_stack[self.next_call_stack_idx].locals);
+    const top = self.methods_call_stack.pop();
+    self.allocator.free(top.locals);
 }
 
-pub fn runMethod(self: *Self, driver: *Driver, resolved_method: anytype) !void {
+pub fn runMethod(self: *Self, driver: *Driver, class: *Class, method_id: u32) !void {
     _ = driver; // TODO: Use for fetching new classes
-    const cf = resolved_method.cf;
-    const method = resolved_method.method;
-    std.log.debug("Engine started method call {s}.{s}", .{ resolved_method.cf.*.this_class, resolved_method.method.name });
+    const method = class.class_file.methods[method_id];
+    std.log.debug("Engine started method call {s}.{s}", .{ class.class_file.this_class, method.name });
 
     const code = extract_method_code(method) orelse {
         return error.MethodCodeNotFound;
     };
-    try self.enterMethod(cf, code);
+    try self.enterMethod(class, code);
 
     while (true) {
-        const frame = &self.call_stack[self.next_call_stack_idx - 1];
+        const frame = self.methods_call_stack.top();
         const decoded = decoder.decodeInstruction(code.code[frame.pc..]);
-        std.log.debug("\texecuting {} on {}", .{ decoded.i, frame });
+        // std.log.debug("\texecuting {} on {}", .{ decoded.i, frame });
+        std.log.debug("\texecuting {}", .{std.json.fmt(decoded.i, .{})});
         switch (decoded.i) {
             .aload => |instr| {
-                frame.stack[frame.stack_size] = frame.locals[instr.index];
-                frame.stack_size += 1;
+                self.exec_stack.push(frame.locals[instr.index]);
                 frame.pc += decoded.sz;
             },
             .@"return" => {
                 self.leaveMethod();
-                if (self.next_call_stack_idx == 0) {
+                if (self.methods_call_stack.empty()) {
                     break;
                 }
             },
             .bipush => |instr| {
-                frame.stack[frame.stack_size] = @intCast(@as(i32, @intCast(instr.value)));
-                frame.stack_size += 1;
+                self.exec_stack.push(instr.value);
+                frame.pc += decoded.sz;
+            },
+            .putstatic => |instr| {
+                frame.this.put_static_field(instr.index, self.exec_stack.pop());
+            },
+            .istore => |instr| {
+                frame.locals[instr.index] = self.exec_stack.pop();
+                frame.pc += decoded.sz;
+            },
+            .iconst => |instr| {
+                self.exec_stack.push(instr.value);
+                frame.pc += decoded.sz;
+            },
+            .iload => |instr| {
+                self.exec_stack.push(frame.locals[instr.index]);
+                frame.pc += decoded.sz;
+            },
+            .iadd => {
+                // TODO: Review this casts, they seem to be error-prone. Better extract them to a function
+                const a: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
+                const b: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
+                self.exec_stack.push(@intCast(a +% b));
+                frame.pc += decoded.sz;
+            },
+            .i2l => { // int to long with sign extension
+                const a: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
+                self.exec_stack.push(@bitCast(@as(i64, @intCast(a))));
                 frame.pc += decoded.sz;
             },
         }
     }
 
-    std.log.debug("Engine finished method call {s}.{s}", .{ resolved_method.cf.*.this_class, resolved_method.method.name });
+    std.log.debug("Engine finished method call {s}.{s}", .{ class.class_file.this_class, method.name });
     return;
 }

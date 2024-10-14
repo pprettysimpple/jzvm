@@ -47,7 +47,7 @@ pub const CPInfo = union(enum) {
 };
 
 const FieldInfo = struct {
-    access_flags: u16,
+    access_flags: common.FieldAccessFlags,
     name: []const u8,
     descriptor: []const u8,
     attributes: []const Attribute,
@@ -96,7 +96,7 @@ pub const Attribute = struct {
         } else if (std.mem.eql(u8, name, "LineNumberTable")) {
             // unsupported
             try reader.skipBytes(attribute_length, .{});
-            std.log.warn("unsupported attribute: {s}\n", .{name});
+            std.log.warn("unsupported attribute: {s}", .{name});
             return Attribute{
                 .name = name,
                 .info = .{ .Unsupported = .{} },
@@ -159,7 +159,7 @@ arena: std.heap.ArenaAllocator,
 magic: u32,
 minor_version: u16,
 major_version: u16,
-access_flags: u16,
+access_flags: common.ClassAccessFlags,
 this_class: []const u8,
 super_class: []const u8,
 constant_pool: []const CPInfo,
@@ -254,10 +254,10 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
                 std.debug.panic("tried to handle constant pool tag {d}", .{tag});
             },
         };
-        std.log.debug("\t[{d}] -- {}", .{ i, cp_info.* });
+        std.log.debug("[{d}] -- {}", .{ i, std.json.fmt(cp_info.*, .{}) });
     }
 
-    const access_flags = try reader.readInt(u16, common.endian);
+    const access_flags: common.ClassAccessFlags = @bitCast(try reader.readInt(u16, common.endian));
 
     const this_class_index = try reader.readInt(u16, common.endian);
     const this_class = constant_pool[constant_pool[this_class_index].ClassInfo.name_index].Utf8;
@@ -280,7 +280,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
     std.log.info("fields_count: {d}", .{fields_count});
     const fields = try allocator.alloc(FieldInfo, fields_count);
     for (fields) |*field| {
-        const field_access_flags = try reader.readInt(u16, common.endian);
+        const field_access_flags: common.FieldAccessFlags = @bitCast(try reader.readInt(u16, common.endian));
         const name_index = try reader.readInt(u16, common.endian);
         const descriptor_index = try reader.readInt(u16, common.endian);
         const attributes_count = try reader.readInt(u16, common.endian);
@@ -295,7 +295,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             .descriptor = constant_pool[descriptor_index].Utf8,
             .attributes = attributes,
         };
-        std.log.debug("\tfield: {}", .{field.*});
+        std.log.debug("{}", .{std.json.fmt(field.*, .{})});
     }
     const methods_count = try reader.readInt(u16, common.endian);
     std.log.info("methods_count: {d}", .{methods_count});
@@ -316,8 +316,9 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             .descriptor = constant_pool[descriptor_index].Utf8,
             .attributes = attributes,
         };
-        std.log.debug("\tmethod: {}", .{method.*});
+        std.log.debug("{}", .{std.json.fmt(method.*, .{})});
     }
+    // TODO: read class-attributes
     // const attributes_count = try reader.read(u16, common.endian);
     // _ = try reader.readMany(attributes_count * 2);
 

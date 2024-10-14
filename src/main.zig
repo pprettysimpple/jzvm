@@ -19,5 +19,6 @@ pub fn main() !void {
     defer engine.deinit();
     defer driver.deinit();
 
-    try engine.runMethod(&driver, try driver.resolve(args[1], "main", "([Ljava/lang/String;)V"));
+    const resolved_main = try driver.resolve(args[1], "main", "([Ljava/lang/String;)V");
+    try engine.runMethod(&driver, resolved_main.class, resolved_main.method_id);
 }

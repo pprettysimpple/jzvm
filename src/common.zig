@@ -1,16 +1,4 @@
 /// File with common definitions, used by jvm specification
-pub const EJavaType = enum {
-    byte,
-    short,
-    int,
-    long,
-    char,
-    float,
-    double,
-    boolean,
-    returnAddress, // TODO: might not be needed
-};
-
 pub const JavaType = struct {
     pub const Byte = u8;
     pub const Short = i16;
@@ -28,13 +16,38 @@ pub const FieldAccessFlags = packed struct {
     protected: bool,
     static: bool,
     final: bool,
-    rsvd1: bool,
-    jvolatile: bool,
+    _1: bool,
+    @"volatile": bool,
     transient: bool,
-    rsvd2: [4]bool,
+    _2: bool,
+    _3: bool,
+    _4: bool,
+    _5: bool,
     synthetic: bool,
-    rsvd3: bool,
-    jenum: bool,
+    rsv3: bool,
+    @"enum": bool,
+    _6: bool,
 };
+
+pub const ClassAccessFlags = packed struct {
+    public: bool,
+    _1: bool,
+    _2: bool,
+    _3: bool,
+    final: bool,
+    super: bool,
+    _4: bool,
+    _5: bool,
+    _6: bool,
+    interface: bool,
+    _7: bool,
+    abstract: bool,
+    synthetic: bool,
+    annotation: bool,
+    @"enum": bool,
+    _8: bool,
+};
+
+pub const MethodId = u32;
 
 pub const endian = @import("std").builtin.Endian.big;

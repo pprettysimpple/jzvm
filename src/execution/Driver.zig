@@ -3,18 +3,19 @@
 const std = @import("std");
 const cl = @import("../class-loading/root.zig");
 const Engine = @import("Engine.zig");
+const Class = @import("rt/Class.zig");
 const Self = @This();
 
 allocator: std.mem.Allocator,
 class_loader: *cl.ClassLoader,
-classes: std.StringHashMap(cl.RawClassFile), // class-name -> RawClassFile
+classes: std.StringHashMap(Class), // class-name -> RawClassFile
 engine: *Engine,
 
 pub fn init(allocator: std.mem.Allocator, class_loader: *cl.ClassLoader, engine: *Engine) Self {
     return Self{
         .allocator = allocator,
         .class_loader = class_loader,
-        .classes = std.StringHashMap(cl.RawClassFile).init(allocator),
+        .classes = std.StringHashMap(Class).init(allocator),
         .engine = engine,
     };
 }
@@ -27,39 +28,34 @@ pub fn deinit(self: *Self) void {
     self.classes.deinit();
 }
 
-fn findMethodInClass(class: *cl.RawClassFile, method_name: []const u8, method_descriptor: []const u8) ?cl.RawClassFile.MethodInfo {
-    for (class.methods) |method| {
+fn findMethodInClass(class: *Class, method_name: []const u8, method_descriptor: []const u8) ?u32 {
+    for (class.class_file.methods, 0..class.class_file.methods.len) |method, idx| {
         if (std.mem.eql(u8, method.name, method_name) and std.mem.eql(u8, method.descriptor, method_descriptor)) {
-            return method;
+            std.log.info("Found method {s} in class {s}, returning index {d}", .{ method_name, class.class_file.this_class, idx });
+            return @intCast(idx);
         }
     }
 
     return null;
 }
 
-fn loadUncachedClass(self: *Self, class_name: []const u8) !*cl.RawClassFile {
-    const new_class_file = try self.class_loader.load(class_name);
-    try self.classes.put(class_name, new_class_file);
-    std.log.info("Loaded new class \"{s}\" with parent \"{s}\"", .{ class_name, new_class_file.super_class });
-
-    if (new_class_file.super_class.len != 0 and self.classes.getPtr(new_class_file.super_class) == null) {
-        _ = try self.loadUncachedClass(new_class_file.super_class); // ignore for now, but we will need it later
-    }
+fn loadUncachedClass(self: *Self, class_name: []const u8) !*Class {
+    // ownership of the raw_class_file is transferred to the class
+    try self.classes.put(class_name, try Class.init(self.allocator, self, try self.class_loader.load(class_name)));
+    std.log.info("Loaded new class \"{s}\"", .{class_name});
 
     return self.classes.getPtr(class_name).?;
 }
 
-pub fn resolve(self: *Self, class_name: []const u8, method_name: []const u8, method_descriptor: []const u8) !struct { cf: *cl.RawClassFile, method: cl.RawClassFile.MethodInfo } {
-    const raw_class_file = self.classes.getPtr(class_name) orelse blk: {
+pub fn resolve(self: *Self, class_name: []const u8, method_name: []const u8, method_descriptor: []const u8) !struct { class: *Class, method_id: u32 } {
+    const class = self.classes.getPtr(class_name) orelse blk: {
         const new_class_file = try self.loadUncachedClass(class_name);
-        try self.engine.runMethod(self, try self.resolve(new_class_file.this_class, "<clinit>", "()V"));
-        try self.engine.runMethod(self, try self.resolve(new_class_file.this_class, "<init>", "()V"));
         break :blk new_class_file;
     };
 
-    const method = findMethodInClass(raw_class_file, method_name, method_descriptor) orelse {
+    const method_id = findMethodInClass(class, method_name, method_descriptor) orelse {
         return error.MethodNotFound;
     };
 
-    return .{ .cf = raw_class_file, .method = method };
+    return .{ .class = class, .method_id = method_id };
 }
