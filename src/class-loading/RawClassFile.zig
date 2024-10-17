@@ -116,12 +116,23 @@ pub const CodeAttribute = struct {
     attributes: []const Attribute,
 };
 
+pub const Annotation = struct {
+    const ElementValue = struct {
+        name: []const u8,
+        value: struct {}, // TODO: implement
+    };
+
+    type_descriptor: []const u8,
+    element_value_pairs: []const ElementValue,
+};
+
 pub const Attribute = struct {
     name: []const u8,
     info: union(enum) {
         Unsupported: struct {},
         ConstantValue: struct { value: CPInfo },
         Code: CodeAttribute,
+        Annotations: []const Annotation,
     },
 
     fn read(reader: std.io.AnyReader, allocator: std.mem.Allocator, constant_pool: []const CPInfo) !Attribute {
@@ -133,14 +144,6 @@ pub const Attribute = struct {
             return Attribute{
                 .name = name,
                 .info = .{ .ConstantValue = .{ .value = constant_pool[constant_value_index] } },
-            };
-        } else if (std.mem.eql(u8, name, "LineNumberTable")) {
-            // unsupported
-            try reader.skipBytes(attribute_length, .{});
-            std.log.warn("unsupported attribute: {s}", .{name});
-            return Attribute{
-                .name = name,
-                .info = .{ .Unsupported = .{} },
             };
         } else if (std.mem.eql(u8, name, "Code")) {
             const max_stack = try reader.readInt(u16, common.endian);
@@ -180,13 +183,37 @@ pub const Attribute = struct {
                     .attributes = attributes,
                 } },
             };
-        } else if (std.mem.eql(u8, name, "Signature") or std.mem.eql(u8, name, "StackMapTable") or std.mem.eql(u8, name, "Exceptions") or std.mem.eql(u8, name, "Deprecated") or std.mem.eql(u8, name, "RuntimeVisibleAnnotations")) {
+        } else if (std.mem.eql(u8, name, "Signature") or std.mem.eql(u8, name, "StackMapTable") or std.mem.eql(u8, name, "Exceptions") or std.mem.eql(u8, name, "Deprecated") or std.mem.eql(u8, name, "LineNumberTable")) {
             // unsupported
             try reader.skipBytes(attribute_length, .{});
             std.log.warn("unsupported attribute: {s}", .{name});
             return Attribute{
                 .name = name,
                 .info = .{ .Unsupported = .{} },
+            };
+        } else if (std.mem.eql(u8, name, "RuntimeVisibleAnnotations")) {
+            const num_annotations = try reader.readInt(u16, common.endian);
+            const annotations = try allocator.alloc(Annotation, num_annotations);
+            errdefer allocator.free(annotations);
+            for (annotations) |*annotation| {
+                const type_index = try reader.readInt(u16, common.endian);
+                const type_descriptor = constant_pool[type_index].Utf8;
+                const num_element_value_pairs = try reader.readInt(u16, common.endian);
+                const element_value_pairs = try allocator.alloc(Annotation.ElementValue, num_element_value_pairs);
+                for (element_value_pairs) |*pair| {
+                    const element_name_index = try reader.readInt(u16, common.endian);
+                    const element_name = constant_pool[element_name_index].Utf8;
+                    pair.* = .{ .name = element_name, .value = .{} };
+                }
+                annotation.* = Annotation{
+                    .type_descriptor = type_descriptor,
+                    .element_value_pairs = element_value_pairs,
+                };
+            }
+
+            return Attribute{
+                .name = name,
+                .info = .{ .Annotations = annotations },
             };
         } else {
             std.debug.panic("unknown attribute name: {s}", .{name});
@@ -255,9 +282,12 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
     const raw_constant_pool = try user_allocator.alloc(RawCPInfo, constant_pool_count);
     defer user_allocator.free(raw_constant_pool);
     @memset(raw_constant_pool, .Undefined);
-    for (raw_constant_pool[1..], 1..constant_pool_count) |*cp_info, i| {
+    var i: u32 = 1;
+    while (i < constant_pool_count) : (i += 1) {
+        const cp_info = &raw_constant_pool[i];
         const tag = try reader.readInt(u8, common.endian);
         cp_info.* = switch (tag) {
+            0 => RawCPInfo{ .Undefined = .{} },
             1 => blk: {
                 const len = try reader.readInt(u16, common.endian);
                 const bytes = try allocator.alloc(u8, len);
@@ -292,6 +322,14 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             3 => blk: {
                 const value = try reader.readInt(i32, common.endian);
                 break :blk RawCPInfo{ .Integer = value };
+            },
+            6 => blk: {
+                const high_bytes: u64 = @byteSwap(try reader.readInt(u32, common.endian));
+                const low_bytes: u64 = @byteSwap(try reader.readInt(u32, common.endian));
+                const bits = (high_bytes << 32) | low_bytes;
+                i += 1;
+                raw_constant_pool[i] = .Undefined;
+                break :blk RawCPInfo{ .Double = @bitCast(bits) };
             },
             11 => blk: {
                 const class_index = try reader.readInt(u16, common.endian);

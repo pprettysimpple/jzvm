@@ -10,11 +10,11 @@ allocator: std.mem.Allocator,
 driver: *Driver,
 class_file: RawClassFile,
 initialized: bool,
-static_fields: std.ArrayList(u64),
+static_fields: std.ArrayList(u32),
 constant_pool_mapping: []?ResolvedCPEntry,
 method_to_code: []?RawClassFile.CodeAttribute,
 
-const ResolvedCPEntry = union {
+const ResolvedCPEntry = union(enum) {
     boolean: common.JavaType.Boolean,
     byte: common.JavaType.Byte,
     char: common.JavaType.Char,
@@ -24,7 +24,7 @@ const ResolvedCPEntry = union {
     float: common.JavaType.Float,
     double: common.JavaType.Double,
     string: []const u8,
-    field: *u64,
+    field: *u32,
     method: struct {
         class: *Self, // TODO: How to track this cross-references?
         method_id: u32,
@@ -39,7 +39,7 @@ pub fn init(allocator: std.mem.Allocator, driver: *Driver, class_file: RawClassF
             static_fields_size += 1;
         }
     }
-    const static_fields = try std.ArrayList(u64).initCapacity(allocator, static_fields_size);
+    const static_fields = try std.ArrayList(u32).initCapacity(allocator, static_fields_size);
     errdefer static_fields.deinit();
 
     const constant_pool_mapping = try allocator.alloc(?ResolvedCPEntry, class_file.constant_pool.len);
@@ -140,6 +140,9 @@ pub fn resolve_constant_pool_entry(self: *Self, constant_pool_id: u32) ResolvedC
                 }
 
                 std.debug.panic("MethodRef not found in other class: {s}.{s} {s}", .{ mr.class_name, mr.name, mr.descriptor });
+            },
+            .Integer => |integer| {
+                break :blk .{ .int = integer };
             },
             else => std.debug.panic("Resolving this constant pool entry is not implemented yet: {}", .{cp_info}),
         }

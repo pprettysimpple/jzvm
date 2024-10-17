@@ -1,47 +1,37 @@
 /// Instructions are the basic building blocks of a program. They are the
 const std = @import("std");
+
+fn ICmp(Comparator: type) type {
+    return struct {
+        fn cmp(a: i32, b: i32) bool {
+            return Comparator.cmp(a, b);
+        }
+
+        offset: i16,
+    };
+}
+
 pub const Instr = union(enum) {
-    aload: struct {
-        const Opcode = 0x2a;
-        index: u8,
-    },
-    bipush: struct {
-        const Opcode = 0x10;
-        value: u8,
-    },
-    @"return": struct {
-        const Opcode = 0xb1;
-    },
-    putstatic: struct {
-        const Opcode = 0xb3;
-        index: u16,
-    },
-    getstatic: struct {
-        const Opcode = 0xb2;
-        index: u16,
-    },
-    istore: struct {
-        const Opcode = 0x36;
-        index: u8,
-    },
-    iconst: struct {
-        const Opcode = 0x03;
-        value: u8,
-    },
-    iload: struct {
-        const Opcode = 0x15;
-        index: u8,
-    },
-    iadd: struct {
-        const Opcode = 0x60;
-    },
-    i2l: struct {
-        const Opcode = 0x85;
-    },
-    invokestatic: struct {
-        const Opcode = 0xb8;
-        index: u16,
-    },
+    aload: struct { index: u8 },
+    bipush: struct { value: u8 },
+    @"return": struct {},
+    putstatic: struct { index: u16 },
+    getstatic: struct { index: u16 },
+    istore: struct { index: u8 },
+    iconst: struct { value: u8 },
+    iload: struct { index: u8 },
+    iadd: struct {},
+    i2l: struct {},
+    invokestatic: struct { index: u16 },
+    if_icmp_ge: ICmp(struct {
+        fn cmp(a: i32, b: i32) bool {
+            return a >= b;
+        }
+    }),
+    iinc: struct { index: u8, value: i8 },
+    goto: struct { offset: i16 },
+    sipush: struct { value: i16 },
+    ldc: struct { index: u8 },
 };
 
 pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
@@ -76,6 +66,11 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0x60 => return .{ .i = Instr{ .iadd = .{} }, .sz = 1 },
         0x85 => return .{ .i = Instr{ .i2l = .{} }, .sz = 1 },
         0xb8 => return .{ .i = Instr{ .invokestatic = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0xa2 => return .{ .i = Instr{ .if_icmp_ge = .{ .offset = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0x84 => return .{ .i = Instr{ .iinc = .{ .index = data[1], .value = @intCast(data[2]) } }, .sz = 3 },
+        0xa7 => return .{ .i = Instr{ .goto = .{ .offset = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0x11 => return .{ .i = Instr{ .sipush = .{ .value = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0x12 => return .{ .i = Instr{ .ldc = .{ .index = data[1] } }, .sz = 2 },
         else => std.debug.panic("Unknown instruction 0x{X}", .{first_byte}),
     }
 }

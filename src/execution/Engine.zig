@@ -10,13 +10,13 @@ const Self = @This();
 
 allocator: std.mem.Allocator,
 methods_call_stack: Stack(MethodFrame, METHODS_STACK_LIMIT),
-exec_stack: Stack(u64, EXECUTION_STACK_LIMIT), // TODO: Maybe this stack should be local to the method
+exec_stack: Stack(u32, EXECUTION_STACK_LIMIT), // TODO: Maybe this stack should be local to the method
 
 pub const METHODS_STACK_LIMIT = 1024; // measured in function calls
 pub const EXECUTION_STACK_LIMIT = 1024; // measured in values
 
 const MethodFrame = struct {
-    locals: []u64,
+    locals: []u32,
     code: []const u8,
     pc: usize,
     this: *Class,
@@ -56,7 +56,7 @@ pub fn init(allocator: std.mem.Allocator) Self {
     return Self{
         .allocator = allocator,
         .methods_call_stack = Stack(MethodFrame, METHODS_STACK_LIMIT){},
-        .exec_stack = Stack(u64, EXECUTION_STACK_LIMIT){},
+        .exec_stack = Stack(u32, EXECUTION_STACK_LIMIT){},
     };
 }
 
@@ -74,7 +74,7 @@ pub fn deinit(self: *Self) void {
 fn enterMethod(self: *Self, class: *Class, method_id: u32) !*MethodFrame {
     const method_info = class.get_method_info(method_id);
     if (method_info.access_flags.native) {
-        std.debug.panic("Native method call not supported yet: {s}.{s}", .{ class.class_file.this_class, method_info.name });
+        std.debug.panic("Native method call not supported yet: {s} {s}", .{ class.class_file.this_class, std.json.fmt(method_info, .{}) });
     }
     if (method_info.access_flags.abstract) {
         std.debug.panic("Abstract method called: {s}.{s}", .{ class.class_file.this_class, method_info.name });
@@ -84,7 +84,7 @@ fn enterMethod(self: *Self, class: *Class, method_id: u32) !*MethodFrame {
         std.debug.panic("Failed to get method code for class {s} method {}", .{ class.class_file.this_class, method_id });
     };
     self.methods_call_stack.push(MethodFrame{
-        .locals = try self.allocator.alloc(u64, code.max_locals),
+        .locals = try self.allocator.alloc(u32, code.max_locals),
         .code = code.code,
         .pc = 0,
         .this = class,
@@ -113,9 +113,10 @@ pub fn runMethod(self: *Self, driver: *Driver, class: *Class, initial_method_id:
     while (frame_opt != null and frame_opt.?.pc < frame_opt.?.code.len) {
         const frame = frame_opt.?;
         std.log.debug("\tframe pc: {} code size: {}", .{ frame.pc, frame.code.len });
+
         const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
-        // std.log.debug("\texecuting {} on {}", .{ decoded.i, frame });
         std.log.debug("\texecuting instr:{}", .{std.json.fmt(decoded.i, .{})});
+
         switch (decoded.i) {
             .aload => |instr| {
                 self.exec_stack.push(frame.locals[instr.index]);
@@ -126,6 +127,10 @@ pub fn runMethod(self: *Self, driver: *Driver, class: *Class, initial_method_id:
             },
             .bipush => |instr| {
                 self.exec_stack.push(instr.value);
+                frame.pc += decoded.sz;
+            },
+            .sipush => |instr| {
+                self.exec_stack.push(@bitCast(@as(i32, instr.value)));
                 frame.pc += decoded.sz;
             },
             .putstatic => |instr| {
@@ -151,20 +156,52 @@ pub fn runMethod(self: *Self, driver: *Driver, class: *Class, initial_method_id:
                 frame.pc += decoded.sz;
             },
             .iadd => {
-                // TODO: Review this casts, they seem to be error-prone. Better extract them to a function
-                const a: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
-                const b: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
+                const a: i32 = @intCast(self.exec_stack.pop());
+                const b: i32 = @intCast(self.exec_stack.pop());
                 self.exec_stack.push(@intCast(a +% b));
                 frame.pc += decoded.sz;
             },
             .i2l => { // int to long with sign extension
-                const a: i32 = @truncate(@as(i64, @intCast(self.exec_stack.pop())));
-                self.exec_stack.push(@bitCast(@as(i64, @intCast(a))));
+                const int_val: i32 = @intCast(self.exec_stack.pop());
+                const long_val: i64 = @intCast(int_val);
+                // push as two 32-bit values
+                const high: i32 = @truncate(long_val >> 32);
+                const low: i32 = @truncate(long_val);
+                self.exec_stack.push(@bitCast(high));
+                self.exec_stack.push(@bitCast(low));
                 frame.pc += decoded.sz;
             },
             .invokestatic => |instr| {
                 const method = frame.this.cached_resolve_constant_pool_entry(instr.index).method;
                 frame_opt = try enterMethod(self, method.class, method.method_id);
+                frame.pc += decoded.sz;
+            },
+            .if_icmp_ge => |instr| {
+                const b: i32 = @intCast(self.exec_stack.pop());
+                const a: i32 = @intCast(self.exec_stack.pop());
+                if (a >= b) {
+                    frame.pc = @intCast(@as(i32, @intCast(frame.pc)) + instr.offset);
+                } else {
+                    frame.pc += decoded.sz;
+                }
+            },
+            .iinc => |instr| {
+                frame.locals[instr.index] = @bitCast(@as(i32, @bitCast(frame.locals[instr.index])) +% instr.value);
+                frame.pc += decoded.sz;
+            },
+            .goto => |instr| {
+                frame.pc = @intCast(@as(i32, @intCast(frame.pc)) + instr.offset);
+            },
+            .ldc => |instr| {
+                const cp_info = frame.this.cached_resolve_constant_pool_entry(instr.index);
+                switch (cp_info) {
+                    .int => |value| {
+                        self.exec_stack.push(@bitCast(value));
+                    },
+                    else => {
+                        std.debug.panic("Unsupported constant pool entry for ldc: {}", .{cp_info});
+                    },
+                }
                 frame.pc += decoded.sz;
             },
         }
