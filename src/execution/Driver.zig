@@ -23,6 +23,7 @@ pub fn init(allocator: std.mem.Allocator, class_loader: *cl.ClassLoader, engine:
 pub fn deinit(self: *Self) void {
     var it = self.classes.valueIterator();
     while (it.next()) |raw_class_file| {
+        std.log.info("Deinitializing class {s}", .{raw_class_file.class_file.this_class});
         raw_class_file.deinit();
     }
     self.classes.deinit();

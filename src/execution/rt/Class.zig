@@ -63,6 +63,8 @@ pub fn init(allocator: std.mem.Allocator, driver: *Driver, class_file: RawClassF
 pub fn deinit(self: *Self) void {
     self.static_fields.deinit();
     self.allocator.free(self.constant_pool_mapping);
+    self.allocator.free(self.method_to_code);
+    self.class_file.deinit();
 }
 
 pub fn try_clinit(self: *Self) void {

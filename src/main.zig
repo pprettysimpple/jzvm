@@ -9,8 +9,11 @@ pub fn main() !void {
         .verbose_log = false,
         .safety = true,
     }){};
+    defer _ = gpa.deinit();
+
     const allocator = gpa.allocator();
     const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
     if (args.len == 1) {
         return std.debug.print("Usage: {s} <class-name>", .{args[0]});
     }
