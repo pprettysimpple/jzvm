@@ -17,6 +17,7 @@ pub const EXECUTION_STACK_LIMIT = 1024; // measured in values
 
 const MethodFrame = struct {
     locals: []u64,
+    code: []const u8,
     pc: usize,
     this: *Class,
 };
@@ -61,7 +62,7 @@ pub fn init(allocator: std.mem.Allocator) Self {
 
 pub fn deinit(self: *Self) void {
     while (!self.methods_call_stack.empty()) {
-        self.leaveMethod();
+        _ = self.leaveMethod();
     }
 
     while (!self.exec_stack.empty()) {
@@ -69,67 +70,73 @@ pub fn deinit(self: *Self) void {
     }
 }
 
-fn extract_method_code(method: RawClassFile.MethodInfo) ?RawClassFile.CodeAttribute {
-    // TODO: lift code up to the class level
-
-    // find code attribute in method.attributes
-    for (method.attributes) |attr| {
-        switch (attr.info) {
-            .Code => |code| return code,
-            else => continue,
-        }
+// TODO: Eliminate allocations. They spread errors over calling code
+fn enterMethod(self: *Self, class: *Class, method_id: u32) !*MethodFrame {
+    const method_info = class.get_method_info(method_id);
+    if (method_info.access_flags.native) {
+        std.debug.panic("Native method call not supported yet: {s}.{s}", .{ class.class_file.this_class, method_info.name });
+    }
+    if (method_info.access_flags.abstract) {
+        std.debug.panic("Abstract method called: {s}.{s}", .{ class.class_file.this_class, method_info.name });
     }
 
-    return null;
-}
-
-// TODO: Eliminate allocations. They spread errors over calling code
-fn enterMethod(self: *Self, class: *Class, code: RawClassFile.CodeAttribute) !void {
-    std.log.debug("\tmethod with max_stack {d} and max_locals {d}", .{ code.max_stack, code.max_locals });
+    const code = class.get_method_code(method_id) catch {
+        std.debug.panic("Failed to get method code for class {s} method {}", .{ class.class_file.this_class, method_id });
+    };
     self.methods_call_stack.push(MethodFrame{
         .locals = try self.allocator.alloc(u64, code.max_locals),
+        .code = code.code,
         .pc = 0,
         .this = class,
     });
+    const frameptr = self.methods_call_stack.top();
+    std.log.debug("\tmethod with max_stack {d} and max_locals {d} and frameptr 0x{x} and code {}", .{ code.max_stack, code.max_locals, @intFromPtr(frameptr), std.json.fmt(code.code, .{}) });
+    return frameptr;
 }
 
-fn leaveMethod(self: *Self) void {
+fn leaveMethod(self: *Self) ?*MethodFrame { // returns the next frame
     const top = self.methods_call_stack.pop();
     self.allocator.free(top.locals);
+    if (self.methods_call_stack.empty()) {
+        return null;
+    }
+    return self.methods_call_stack.top();
 }
 
-pub fn runMethod(self: *Self, driver: *Driver, class: *Class, method_id: u32) !void {
+pub fn runMethod(self: *Self, driver: *Driver, class: *Class, initial_method_id: u32) !void {
     _ = driver; // TODO: Use for fetching new classes
-    const method = class.class_file.methods[method_id];
-    std.log.debug("Engine started method call {s}.{s}", .{ class.class_file.this_class, method.name });
+    const initial_method = class.class_file.methods[initial_method_id];
+    std.log.info("Engine started method call {s}.{s}", .{ class.class_file.this_class, initial_method.name });
 
-    const code = extract_method_code(method) orelse {
-        return error.MethodCodeNotFound;
-    };
-    try self.enterMethod(class, code);
+    var frame_opt: ?*MethodFrame = try self.enterMethod(class, initial_method_id);
 
-    while (true) {
-        const frame = self.methods_call_stack.top();
-        const decoded = decoder.decodeInstruction(code.code[frame.pc..]);
+    while (frame_opt != null and frame_opt.?.pc < frame_opt.?.code.len) {
+        const frame = frame_opt.?;
+        std.log.debug("\tframe pc: {} code size: {}", .{ frame.pc, frame.code.len });
+        const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
         // std.log.debug("\texecuting {} on {}", .{ decoded.i, frame });
-        std.log.debug("\texecuting {}", .{std.json.fmt(decoded.i, .{})});
+        std.log.debug("\texecuting instr:{}", .{std.json.fmt(decoded.i, .{})});
         switch (decoded.i) {
             .aload => |instr| {
                 self.exec_stack.push(frame.locals[instr.index]);
                 frame.pc += decoded.sz;
             },
             .@"return" => {
-                self.leaveMethod();
-                if (self.methods_call_stack.empty()) {
-                    break;
-                }
+                frame_opt = self.leaveMethod();
             },
             .bipush => |instr| {
                 self.exec_stack.push(instr.value);
                 frame.pc += decoded.sz;
             },
             .putstatic => |instr| {
-                frame.this.put_static_field(instr.index, self.exec_stack.pop());
+                const stack = &self.exec_stack;
+                frame.this.cached_resolve_constant_pool_entry(instr.index).field.* = stack.pop();
+                frame.pc += decoded.sz;
+            },
+            .getstatic => |instr| {
+                const value = frame.this.cached_resolve_constant_pool_entry(instr.index).field.*;
+                self.exec_stack.push(value);
+                frame.pc += decoded.sz;
             },
             .istore => |instr| {
                 frame.locals[instr.index] = self.exec_stack.pop();
@@ -155,9 +162,14 @@ pub fn runMethod(self: *Self, driver: *Driver, class: *Class, method_id: u32) !v
                 self.exec_stack.push(@bitCast(@as(i64, @intCast(a))));
                 frame.pc += decoded.sz;
             },
+            .invokestatic => |instr| {
+                const method = frame.this.cached_resolve_constant_pool_entry(instr.index).method;
+                frame_opt = try enterMethod(self, method.class, method.method_id);
+                frame.pc += decoded.sz;
+            },
         }
     }
 
-    std.log.debug("Engine finished method call {s}.{s}", .{ class.class_file.this_class, method.name });
+    std.log.debug("Engine finished method call {s}.{s}", .{ class.class_file.this_class, initial_method.name });
     return;
 }

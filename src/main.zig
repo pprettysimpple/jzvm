@@ -2,8 +2,13 @@ const std = @import("std");
 const cl = @import("class-loading/root.zig");
 const exe = @import("execution/root.zig");
 
+pub const log_level: std.log.Level = .debug;
+
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .verbose_log = false }){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{
+        .verbose_log = false,
+        .safety = true,
+    }){};
     const allocator = gpa.allocator();
     const args = try std.process.argsAlloc(allocator);
     if (args.len == 1) {
@@ -19,6 +24,13 @@ pub fn main() !void {
     defer engine.deinit();
     defer driver.deinit();
 
-    const resolved_main = try driver.resolve(args[1], "main", "([Ljava/lang/String;)V");
+    const resolved_main = driver.resolveClassMethod(args[1], "main", "([Ljava/lang/String;)V") catch |err| {
+        if (err == error.MethodNotFound) {
+            try std.io.getStdOut().writer().print("Main method was not found for class {s}", .{args[1]});
+            return;
+        } else {
+            return err;
+        }
+    };
     try engine.runMethod(&driver, resolved_main.class, resolved_main.method_id);
 }

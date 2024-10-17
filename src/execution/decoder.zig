@@ -16,6 +16,10 @@ pub const Instr = union(enum) {
         const Opcode = 0xb3;
         index: u16,
     },
+    getstatic: struct {
+        const Opcode = 0xb2;
+        index: u16,
+    },
     istore: struct {
         const Opcode = 0x36;
         index: u8,
@@ -34,6 +38,10 @@ pub const Instr = union(enum) {
     i2l: struct {
         const Opcode = 0x85;
     },
+    invokestatic: struct {
+        const Opcode = 0xb8;
+        index: u16,
+    },
 };
 
 pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
@@ -47,6 +55,7 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0x2d => return .{ .i = Instr{ .aload = .{ .index = 3 } }, .sz = 1 },
         0xb1 => return .{ .i = Instr{ .@"return" = .{} }, .sz = 1 },
         0xb3 => return .{ .i = Instr{ .putstatic = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0xb2 => return .{ .i = Instr{ .getstatic = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         0x36 => return .{ .i = Instr{ .istore = .{ .index = data[1] } }, .sz = 2 },
         0x3b => return .{ .i = Instr{ .istore = .{ .index = 0 } }, .sz = 1 },
         0x3c => return .{ .i = Instr{ .istore = .{ .index = 1 } }, .sz = 1 },
@@ -66,6 +75,7 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0x1d => return .{ .i = Instr{ .iload = .{ .index = 3 } }, .sz = 1 },
         0x60 => return .{ .i = Instr{ .iadd = .{} }, .sz = 1 },
         0x85 => return .{ .i = Instr{ .i2l = .{} }, .sz = 1 },
+        0xb8 => return .{ .i = Instr{ .invokestatic = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         else => std.debug.panic("Unknown instruction 0x{X}", .{first_byte}),
     }
 }

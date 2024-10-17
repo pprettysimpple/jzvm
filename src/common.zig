@@ -48,6 +48,25 @@ pub const ClassAccessFlags = packed struct {
     _8: bool,
 };
 
+pub const MethodAccessFlags = packed struct {
+    public: bool,
+    private: bool,
+    protected: bool,
+    static: bool,
+    final: bool,
+    synchronized: bool,
+    bridge: bool,
+    varargs: bool,
+    native: bool,
+    _1: bool,
+    abstract: bool,
+    strict: bool,
+    synthetic: bool,
+    _2: bool,
+    _3: bool,
+    _4: bool,
+};
+
 pub const MethodId = u32;
 
 pub const endian = @import("std").builtin.Endian.big;
