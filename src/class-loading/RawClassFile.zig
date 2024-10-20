@@ -186,7 +186,7 @@ pub const Attribute = struct {
         } else if (std.mem.eql(u8, name, "Signature") or std.mem.eql(u8, name, "StackMapTable") or std.mem.eql(u8, name, "Exceptions") or std.mem.eql(u8, name, "Deprecated") or std.mem.eql(u8, name, "LineNumberTable")) {
             // unsupported
             try reader.skipBytes(attribute_length, .{});
-            std.log.warn("unsupported attribute: {s}", .{name});
+            // std.log.warn("unsupported attribute: {s}", .{name});
             return Attribute{
                 .name = name,
                 .info = .{ .Unsupported = .{} },
@@ -348,7 +348,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
                 std.debug.panic("tried to handle constant pool tag {d}", .{tag});
             },
         };
-        std.log.debug("[{d}] -- {}", .{ i, std.json.fmt(cp_info.*, .{}) });
+        // std.log.debug("[{d}] -- {}", .{ i, std.json.fmt(cp_info.*, .{}) });
     }
 
     const constant_pool = try allocator.alloc(CPInfo, constant_pool_count);
@@ -439,7 +439,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
     std.log.debug("interfaces_count: {d}", .{interfaces_count});
     for (interfaces) |*interface| {
         interface.* = try reader.readInt(u16, u.endian);
-        std.log.debug("\tinterface: {d}", .{interface.*});
+        // std.log.debug("\tinterface: {d}", .{interface.*});
     }
     const fields_count = try reader.readInt(u16, u.endian);
     std.log.debug("fields_count: {d}", .{fields_count});
@@ -460,7 +460,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             .descriptor = constant_pool[descriptor_index].Utf8,
             .attributes = attributes,
         };
-        std.log.debug("{}", .{std.json.fmt(field.*, .{})});
+        // std.log.debug("{}", .{std.json.fmt(field.*, .{})});
     }
     const methods_count = try reader.readInt(u16, u.endian);
     std.log.debug("methods_count: {d}", .{methods_count});
@@ -481,7 +481,7 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             .descriptor = constant_pool[descriptor_index].Utf8,
             .attributes = attributes,
         };
-        std.log.debug("{}", .{std.json.fmt(method.*, .{})});
+        // std.log.debug("{}", .{std.json.fmt(method.*, .{})});
     }
     // TODO: read class-attributes
     // const attributes_count = try reader.read(u16, u.endian);

@@ -1,23 +1,24 @@
 /// Runtime representation of a class -- Class object
 /// resolves constant pool entries on-demand
+const Self = @This();
 const std = @import("std");
 const RawClassFile = @import("../../class-loading/root.zig").RawClassFile;
 const Driver = @import("../Driver.zig");
 const Object = @import("Object.zig");
+const string = @import("../string.zig");
 const u = @import("../../common.zig");
-const Self = @This();
 
 allocator: std.mem.Allocator,
 driver: *Driver,
 class_file: RawClassFile,
 initialized: bool,
-static_fields: std.ArrayList(u.Value),
+static_fields: std.ArrayList(u.TyValue),
 constant_pool_mapping: []?ResolvedCPEntry,
 method_to_code: []?RawClassFile.CodeAttribute,
 
 const ResolvedCPEntry = union(enum) {
-    value: u.Value,
-    static_field: *u.Value,
+    value: u.TyValue,
+    static_field: *u.TyValue,
     method: struct {
         class: *Self, // TODO: How to go from Class to Object with that Class?
         method_id: u32,
@@ -32,7 +33,7 @@ pub fn init(allocator: std.mem.Allocator, driver: *Driver, class_file: RawClassF
             static_fields_size += 1;
         }
     }
-    const static_fields = try std.ArrayList(u.Value).initCapacity(allocator, static_fields_size);
+    var static_fields = try std.ArrayList(u.TyValue).initCapacity(allocator, static_fields_size);
     errdefer static_fields.deinit();
 
     const constant_pool_mapping = try allocator.alloc(?ResolvedCPEntry, class_file.constant_pool.len);
@@ -54,6 +55,11 @@ pub fn init(allocator: std.mem.Allocator, driver: *Driver, class_file: RawClassF
 }
 
 pub fn deinit(self: *Self) void {
+    for (self.static_fields.items) |field| {
+        if (field.ty == u.Ty.reference) {
+            field.v.reference.deinit();
+        }
+    }
     self.static_fields.deinit();
     self.allocator.free(self.constant_pool_mapping);
     self.allocator.free(self.method_to_code);
@@ -79,7 +85,10 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
             .FieldRef => |fr| {
                 if (std.mem.eql(u8, fr.class_name, self.class_file.this_class)) {
                     // TODO: Check fr.name_and_type_index maybe?
-                    break :blk .{ .static_field = self.static_fields.addOne() catch unreachable };
+                    const ty = u.Ty.fromDescriptor(fr.descriptor[0]);
+                    const ptr = self.static_fields.addOne() catch unreachable;
+                    ptr.* = .{ .v = ty.defaultValue(), .ty = ty };
+                    break :blk .{ .static_field = ptr };
                 }
 
                 // it is an other class and we must aquire it's *Class ptr and static field id
@@ -138,11 +147,12 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
                 std.debug.panic("MethodRef not found in other class: {s}.{s} {s}. Resolution from base class is not implemented", .{ mr.class_name, mr.name, mr.descriptor });
             },
             .Integer => |integer| {
-                break :blk .{ .value = .{ .int = integer } };
+                break :blk .{ .value = .{ .v = .{ .int = integer }, .ty = u.Ty.int } };
             },
-            // .String => |string| {
-            //     break :blk .{ .string = string };
-            // },
+            .String => |utf8| {
+                const v = u.Value{ .reference = .{ .class = string.initFromUTF8(self.driver, utf8) catch unreachable } }; // TODO: Recover with exception
+                break :blk .{ .value = .{ .v = v, .ty = u.Ty.reference } };
+            },
             else => std.debug.panic("Resolving this constant pool entry is not implemented yet: {}", .{cp_info}),
         }
     };

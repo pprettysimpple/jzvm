@@ -32,6 +32,7 @@ pub const Instr = union(enum) {
     goto: struct { offset: i16 },
     sipush: struct { value: i16 },
     ldc: struct { index: u8 },
+    astore: struct { index: u8 },
 };
 
 pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
@@ -71,6 +72,11 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0xa7 => return .{ .i = Instr{ .goto = .{ .offset = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         0x11 => return .{ .i = Instr{ .sipush = .{ .value = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         0x12 => return .{ .i = Instr{ .ldc = .{ .index = data[1] } }, .sz = 2 },
+        0x3a => return .{ .i = Instr{ .astore = .{ .index = data[1] } }, .sz = 2 },
+        0x4b => return .{ .i = Instr{ .astore = .{ .index = 0 } }, .sz = 1 },
+        0x4c => return .{ .i = Instr{ .astore = .{ .index = 1 } }, .sz = 1 },
+        0x4d => return .{ .i = Instr{ .astore = .{ .index = 2 } }, .sz = 1 },
+        0x4e => return .{ .i = Instr{ .astore = .{ .index = 3 } }, .sz = 1 },
         else => std.debug.panic("Unknown instruction 0x{X}", .{first_byte}),
     }
 }

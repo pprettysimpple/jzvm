@@ -2,6 +2,7 @@
 const Self = @This();
 const Heap = @import("execution/rt/Heap.zig");
 const Object = @import("execution/rt/Object.zig");
+const Array = @import("execution/rt/Array.zig");
 
 // types for jvm
 // enum for possible types
@@ -25,16 +26,63 @@ pub const Ty = enum {
     boolean,
     reference,
     returnAddress,
+
+    pub fn defaultValue(self: Ty) Value {
+        return switch (self) {
+            .byte => .{ .byte = 0 },
+            .short => .{ .short = 0 },
+            .int => .{ .int = 0 },
+            .long => .{ .long = 0 },
+            .char => .{ .char = 0 },
+            .float => .{ .float = 0 },
+            .double => .{ .double = 0 },
+            .boolean => .{ .boolean = false },
+            .reference => .{ .reference = .{ .class = Heap.Ref(Object).initNull() } },
+            .returnAddress => .{ .returnAddress = 0 },
+        };
+    }
+
+    pub fn fromDescriptor(descriptor: u8) Ty {
+        return switch (descriptor) {
+            'B' => .byte,
+            'S' => .short,
+            'I' => .int,
+            'J' => .long,
+            'C' => .char,
+            'F' => .float,
+            'D' => .double,
+            'Z' => .boolean,
+            '[' => .reference,
+            'L' => .reference,
+            else => unreachable,
+        };
+    }
 };
 
 pub const RefTy = enum {
     class,
-    // TODO: array, primitive
+    array,
+    // TODO: primitive maybe?
 };
 
 // most of the time, we want to know what type of reference it is
 pub const AnyRef = union(RefTy) {
     class: Heap.Ref(Object),
+    array: Heap.Ref(Array),
+
+    pub fn clone(self: AnyRef) AnyRef {
+        return switch (self) {
+            .class => .{ .class = self.class.clone() },
+            .array => .{ .array = self.array.clone() },
+        };
+    }
+
+    pub fn deinit(self: AnyRef) void {
+        switch (self) {
+            .class => self.class.deinit(),
+            .array => self.array.deinit(),
+        }
+    }
 };
 
 // not-tagged union
@@ -145,6 +193,11 @@ pub const Value = union {
             },
         };
     }
+};
+
+pub const TyValue = struct {
+    v: Value,
+    ty: Ty,
 };
 
 pub const FieldAccessFlags = packed struct {
