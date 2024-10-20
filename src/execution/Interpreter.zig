@@ -110,6 +110,11 @@ const MethodFrame = struct {
         allocator.free(self.locals);
         self.this.deinit();
     }
+
+    fn verify(self: *MethodFrame) void {
+        std.debug.assert(self.locals.len == self.locals_is_ref.capacity());
+        std.debug.assert(self.op_stack.items.len == self.op_stack_is_ref.bit_len);
+    }
 };
 
 pub fn init(vm_alloc: std.mem.Allocator) Self {
@@ -162,6 +167,7 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
     var depth: u32 = 1;
 
     while (depth > 0) {
+        frame.verify();
         std.log.debug("\tframe_ptr: 0x{X} frame pc: {} code size: {}", .{ @intFromPtr(frame), frame.pc, frame.code.len });
 
         const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
@@ -203,6 +209,7 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
             },
             .istore => |instr| {
                 frame.locals[instr.index] = frame.op_stack.pop();
+                _ = frame.op_stack_is_ref.pop();
                 frame.locals_is_ref.unset(instr.index);
                 frame.pc += decoded.sz;
             },
