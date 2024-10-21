@@ -36,6 +36,8 @@ pub const Instr = union(enum) {
     sipush: struct { value: i16 },
     ldc: struct { index: u8 },
     astore: struct { index: u8 },
+    new: struct { index: u16 },
+    dup: struct {},
 };
 
 pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
@@ -83,6 +85,8 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0x4c => return .{ .i = Instr{ .astore = .{ .index = 1 } }, .sz = 1 },
         0x4d => return .{ .i = Instr{ .astore = .{ .index = 2 } }, .sz = 1 },
         0x4e => return .{ .i = Instr{ .astore = .{ .index = 3 } }, .sz = 1 },
+        0xbb => return .{ .i = Instr{ .new = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0x59 => return .{ .i = Instr{ .dup = .{} }, .sz = 1 },
         else => std.debug.panic("Unknown instruction 0x{X}", .{first_byte}),
     }
 }

@@ -19,6 +19,7 @@ method_to_code: []?RawClassFile.CodeAttribute,
 const ResolvedCPEntry = union(enum) {
     value: u.TyValue,
     static_field: *u.TyValue,
+    class: *Self,
     method: struct {
         class: *Self, // TODO: How to go from Class to Object with that Class?
         method_id: u32,
@@ -34,6 +35,7 @@ const ResolvedCPEntry = union(enum) {
                 }
             },
             .static_field => {},
+            .class => {},
             .method => {
                 allocator.free(self.method.args);
             },
@@ -177,6 +179,14 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
             .String => |utf8| {
                 const v = u.Value{ .reference = .{ .class = string.initFromUTF8(self.driver, utf8) catch unreachable } }; // TODO: Recover with exception
                 break :blk .{ .value = .{ .v = v, .ty = u.Ty.reference } };
+            },
+            .ClassInfo => |class_info| {
+                if (std.mem.eql(u8, class_info, self.class_file.this_class)) {
+                    break :blk .{ .class = self };
+                }
+
+                const other_class = self.driver.resolveClass(class_info) catch unreachable; // TODO: Recover with exception
+                break :blk .{ .class = other_class };
             },
             else => std.debug.panic("Resolving this constant pool entry is not implemented yet: {}", .{cp_info}),
         }

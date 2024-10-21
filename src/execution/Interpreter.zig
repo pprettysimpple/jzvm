@@ -174,8 +174,8 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
         const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
         std.log.debug("\texecuting instr:{}", .{std.json.fmt(decoded.i, .{})});
 
-        // std.log.debug("\tlocals: {any}", .{frame.locals});
-        // std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
+        std.log.debug("\tlocals: {any}", .{frame.locals});
+        std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
         switch (decoded.i) {
             .aload => |instr| {
                 frame.op_stack.append(frame.locals[instr.index]) catch unreachable;
@@ -248,8 +248,8 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 frame.pc += decoded.sz;
             },
             .idiv => {
-                const a = frame.op_stack.pop().int;
                 const b = frame.op_stack.pop().int;
+                const a = frame.op_stack.pop().int;
                 // TODO: Check for division by zero and set exception
                 if (b == -1) {
                     // Instructions 6.5 idiv
@@ -273,16 +273,21 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 frame = try enterMethod(self, .{ .class = method.class }, method.method_id);
                 depth += 1;
                 // move arguments from stack to locals
+                var total_slots: u32 = 0; // TODO: precalc
+                for (method.args) |arg| {
+                    total_slots += arg.slotsCount();
+                }
                 var locals_offset: u32 = 0;
                 for (method.args) |arg| {
-                    frame.locals[locals_offset] = prev_frame.op_stack.pop();
+                    const this_local_offset = total_slots - locals_offset - arg.slotsCount();
+                    frame.locals[this_local_offset] = prev_frame.op_stack.pop();
                     _ = prev_frame.op_stack_is_ref.pop(); // not touching it at all
                     if (arg == u.Ty.reference) {
-                        frame.locals_is_ref.set(locals_offset);
+                        frame.locals_is_ref.set(this_local_offset);
                     } else {
-                        frame.locals_is_ref.unset(locals_offset);
+                        frame.locals_is_ref.unset(this_local_offset);
                     }
-                    std.log.debug("\t\targ: {any}", .{frame.locals[locals_offset]});
+                    std.log.debug("\t\targ: {any}", .{frame.locals[this_local_offset]});
                     locals_offset += arg.slotsCount();
                 }
             },
@@ -327,6 +332,25 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 } else {
                     frame.locals_is_ref.unset(instr.index);
                 }
+                frame.pc += decoded.sz;
+            },
+            .new => |instr| {
+                frame.pc += decoded.sz;
+                const class = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).class;
+                const object = Object.init(class, self.vm_alloc) catch unreachable; // TODO: Recover with exception
+                const object_ref = Heap.Ref(Object).init(object) catch unreachable; // TODO: Recover with exception
+                frame.op_stack.append(.{ .reference = .{ .class = object_ref } }) catch unreachable;
+                frame.op_stack_is_ref.push(1) catch unreachable;
+            },
+            .dup => {
+                const value = frame.op_stack.getLast();
+                const is_ref = frame.op_stack_is_ref.peek();
+                if (is_ref == 1) {
+                    frame.op_stack.append(.{ .reference = value.reference.clone() }) catch unreachable;
+                } else {
+                    frame.op_stack.append(value) catch unreachable;
+                }
+                frame.op_stack_is_ref.push(is_ref) catch unreachable;
                 frame.pc += decoded.sz;
             },
         }

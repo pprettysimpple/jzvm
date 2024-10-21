@@ -102,7 +102,7 @@ pub const AnyRef = union(RefTy) {
 };
 
 // not-tagged union. although, you can tag it for debugging op_stack
-pub const Value = union {
+pub const Value = union(enum) {
     undefined: struct {},
     byte: u8,
     short: i16,
