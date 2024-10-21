@@ -3,6 +3,7 @@ const Self = @This();
 const Heap = @import("execution/rt/Heap.zig");
 const Object = @import("execution/rt/Object.zig");
 const Array = @import("execution/rt/Array.zig");
+const std = @import("std");
 
 // types for jvm
 // enum for possible types
@@ -57,6 +58,21 @@ pub const Ty = enum {
             else => unreachable,
         };
     }
+
+    pub fn slotsCount(self: Ty) u32 {
+        return switch (self) {
+            .byte => 1,
+            .short => 1,
+            .int => 1,
+            .long => 2,
+            .char => 1,
+            .float => 1,
+            .double => 2,
+            .boolean => 1,
+            .reference => 1,
+            .returnAddress => 1,
+        };
+    }
 };
 
 pub const RefTy = enum {
@@ -85,8 +101,9 @@ pub const AnyRef = union(RefTy) {
     }
 };
 
-// not-tagged union
+// not-tagged union. although, you can tag it for debugging op_stack
 pub const Value = union {
+    undefined: struct {},
     byte: u8,
     short: i16,
     int: i32,
@@ -256,6 +273,76 @@ pub const MethodAccessFlags = packed struct {
     _3: bool,
     _4: bool,
 };
+
+// same as above with u8, but returns how many bytes it consumed
+// might kill your native stack. choose wisely
+pub fn parseFieldDescriptor(descriptor: []const u8) !struct {
+    ty: Ty,
+    rest: []const u8,
+} {
+    std.log.debug("parseFieldDescriptor: {s}", .{descriptor});
+    const first = descriptor[0];
+    return switch (first) {
+        'B' => .{ .ty = Ty.byte, .rest = descriptor[1..] },
+        'S' => .{ .ty = Ty.short, .rest = descriptor[1..] },
+        'I' => .{ .ty = Ty.int, .rest = descriptor[1..] },
+        'J' => .{ .ty = Ty.long, .rest = descriptor[1..] },
+        'C' => .{ .ty = Ty.char, .rest = descriptor[1..] },
+        'F' => .{ .ty = Ty.float, .rest = descriptor[1..] },
+        'D' => .{ .ty = Ty.double, .rest = descriptor[1..] },
+        'Z' => .{ .ty = Ty.boolean, .rest = descriptor[1..] },
+        '[' => {
+            const inner = try parseFieldDescriptor(descriptor[1..]);
+            return .{ .ty = Ty.reference, .rest = inner.rest };
+        },
+        'L' => {
+            var i: u32 = 1;
+            while (descriptor[i] != ';') {
+                i += 1;
+            }
+            return .{ .ty = Ty.reference, .rest = descriptor[i + 1 ..] };
+        },
+        else => return error.InvalidFieldDescriptor,
+    };
+}
+
+// walk twice, first to count args, second to fill args. but it is fine
+pub fn parseMethodDescriptor(allocator: std.mem.Allocator, descriptor: []const u8) !struct {
+    return_ty: ?Ty,
+    args: []Ty,
+} {
+    const first = descriptor[0];
+    if (first != '(') {
+        return error.InvalidMethodDescriptor;
+    }
+
+    // first pass to count args
+    var offset: u32 = 1;
+    var nargs: u32 = 0;
+    while (descriptor[offset] != ')') {
+        const inner = try parseFieldDescriptor(descriptor[offset..]);
+        offset = @intCast(descriptor.len - inner.rest.len);
+        nargs += 1;
+    }
+    const return_ty = parseFieldDescriptor(descriptor[offset + 1 ..]) catch null;
+
+    // second pass to fill args
+    const args = try allocator.alloc(Ty, nargs);
+    offset = 1;
+    for (args) |*arg| {
+        const inner = try parseFieldDescriptor(descriptor[offset..]);
+        arg.* = inner.ty;
+        offset = @intCast(descriptor.len - inner.rest.len);
+    }
+
+    if (return_ty == null) {
+        std.log.debug("parseMethodDescriptor: {s} has void return_ty and {d} args", .{ descriptor, nargs });
+        return .{ .return_ty = null, .args = args };
+    }
+
+    std.log.debug("parseMethodDescriptor: {s} has return_ty: {} and {d} args", .{ descriptor, return_ty.?.ty, nargs });
+    return .{ .return_ty = return_ty.?.ty, .args = args };
+}
 
 pub const MethodId = u32;
 

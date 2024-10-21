@@ -58,6 +58,7 @@ const MethodFrame = struct {
         const code = this.getClass().getMethodCodeById(method_id).?;
 
         const locals = try allocator.alloc(u.Value, code.max_locals);
+        @memset(locals, .{ .undefined = .{} });
         errdefer allocator.free(locals);
 
         var locals_is_ref = try std.DynamicBitSet.initEmpty(allocator, code.max_locals);
@@ -185,6 +186,15 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 frame = self.leaveMethod() orelse return; // last frame popped => main finished
                 depth -= 1;
             },
+            .ireturn => {
+                const value = frame.op_stack.pop();
+                _ = frame.op_stack_is_ref.pop(); // passed to caller, so no need to deinit
+                frame = self.leaveMethod() orelse return; // last frame popped => main finished
+                depth -= 1;
+                // here we have new frame
+                frame.op_stack.append(value) catch unreachable;
+                frame.op_stack_is_ref.push(0) catch unreachable;
+            },
             .bipush => |instr| {
                 frame.op_stack.append(.{ .int = @intCast(instr.value) }) catch unreachable;
                 frame.op_stack_is_ref.push(0) catch unreachable;
@@ -226,10 +236,29 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
             .iadd => {
                 const a = frame.op_stack.pop().int;
                 const b = frame.op_stack.pop().int;
-                _ = frame.op_stack_is_ref.pop();
-                _ = frame.op_stack_is_ref.pop();
                 frame.op_stack.append(.{ .int = a +% b }) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                _ = frame.op_stack_is_ref.pop(); // optimization: no need to pop/push same value
+                frame.pc += decoded.sz;
+            },
+            .imul => {
+                const a = frame.op_stack.pop().int;
+                const b = frame.op_stack.pop().int;
+                frame.op_stack.append(.{ .int = a *% b }) catch unreachable;
+                _ = frame.op_stack_is_ref.pop();
+                frame.pc += decoded.sz;
+            },
+            .idiv => {
+                const a = frame.op_stack.pop().int;
+                const b = frame.op_stack.pop().int;
+                // TODO: Check for division by zero and set exception
+                if (b == -1) {
+                    // Instructions 6.5 idiv
+                    frame.op_stack.append(.{ .int = b }) catch unreachable;
+                } else {
+                    // for zig's @divTrunc -1 is UB
+                    frame.op_stack.append(.{ .int = @divTrunc(a, b) }) catch unreachable;
+                }
+                _ = frame.op_stack_is_ref.pop(); // optimization: no need to pop/push same value
                 frame.pc += decoded.sz;
             },
             .i2l => { // int to long with sign extension
@@ -239,9 +268,23 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
             },
             .invokestatic => |instr| {
                 frame.pc += decoded.sz;
+                const prev_frame = frame;
                 const method = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).method;
                 frame = try enterMethod(self, .{ .class = method.class }, method.method_id);
                 depth += 1;
+                // move arguments from stack to locals
+                var locals_offset: u32 = 0;
+                for (method.args) |arg| {
+                    frame.locals[locals_offset] = prev_frame.op_stack.pop();
+                    _ = prev_frame.op_stack_is_ref.pop(); // not touching it at all
+                    if (arg == u.Ty.reference) {
+                        frame.locals_is_ref.set(locals_offset);
+                    } else {
+                        frame.locals_is_ref.unset(locals_offset);
+                    }
+                    std.log.debug("\t\targ: {any}", .{frame.locals[locals_offset]});
+                    locals_offset += arg.slotsCount();
+                }
             },
             .if_icmp_ge => |instr| {
                 const b = frame.op_stack.pop().int;

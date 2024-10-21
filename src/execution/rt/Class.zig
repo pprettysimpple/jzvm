@@ -22,7 +22,23 @@ const ResolvedCPEntry = union(enum) {
     method: struct {
         class: *Self, // TODO: How to go from Class to Object with that Class?
         method_id: u32,
+        return_ty: ?u.Ty,
+        args: []u.Ty,
     },
+
+    pub fn deinit(self: ResolvedCPEntry, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .value => {
+                if (self.value.ty == u.Ty.reference) {
+                    self.value.v.reference.deinit();
+                }
+            },
+            .static_field => {},
+            .method => {
+                allocator.free(self.method.args);
+            },
+        }
+    }
 };
 
 // Takes ownership of this the RawClassFile
@@ -60,6 +76,9 @@ pub fn deinit(self: *Self) void {
             field.v.reference.deinit();
         }
     }
+    for (self.constant_pool_mapping) |entry| if (entry) |e| {
+        e.deinit(self.allocator);
+    };
     self.static_fields.deinit();
     self.allocator.free(self.constant_pool_mapping);
     self.allocator.free(self.method_to_code);
@@ -114,7 +133,13 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
                         if (!method.access_flags.static) {
                             std.debug.panic("MethodRef to non-static method is not supported: {s}.{s}", .{ mr.class_name, mr.name });
                         }
-                        break :blk .{ .method = .{ .class = self, .method_id = @intCast(idx) } };
+                        const parsed = u.parseMethodDescriptor(self.allocator, mr.descriptor) catch unreachable; // TODO: Recover with exception
+                        break :blk .{ .method = .{
+                            .class = self,
+                            .method_id = @intCast(idx),
+                            .return_ty = parsed.return_ty,
+                            .args = parsed.args,
+                        } };
                     }
                 }
 
@@ -160,7 +185,16 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
 }
 
 pub fn cachedResolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEntry {
-    return self.constant_pool_mapping[constant_pool_id] orelse self.resolveConstantPoolEntry(constant_pool_id);
+    const entry = self.constant_pool_mapping[constant_pool_id] orelse self.resolveConstantPoolEntry(constant_pool_id);
+    return switch (entry) {
+        .value => |ty_val| {
+            if (ty_val.ty == u.Ty.reference) {
+                return .{ .value = .{ .v = .{ .reference = ty_val.v.reference.clone() }, .ty = ty_val.ty } };
+            }
+            return entry;
+        },
+        else => entry,
+    };
 }
 
 pub fn resolveMethodInThisClass(self: *Self, method_name: []const u8, method_descriptor: []const u8) ?u32 {
