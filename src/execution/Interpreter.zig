@@ -52,6 +52,7 @@ const MethodFrame = struct {
     code: []const u8,
     pc: usize,
     this: ThisObject,
+    method_info: RawClassFile.MethodInfo, // for debugging
 
     // Works only for bytecode methods
     pub fn initBytecodeMethod(allocator: std.mem.Allocator, this: ThisObject, method_id: u32) !MethodFrame {
@@ -81,6 +82,7 @@ const MethodFrame = struct {
             .code = code.code,
             .pc = 0,
             .this = this.tryClone(),
+            .method_info = this.getClass().class_file.methods[method_id],
         };
     }
 
@@ -138,6 +140,10 @@ fn enterMethod(self: *Self, this: ThisObject, method_id: u32) !*MethodFrame {
     const method_info = this.getClass().getMethodInfoById(method_id);
     if (method_info.access_flags.native) {
         // @import("../NativeStorage.zig").findMethod(this.class.class_file.this_class, method_info.name, method_info.descriptor);
+
+        if (std.mem.eql(u8, method_info.name, "registerNatives")) {
+            return &self.call_stack.buffer[self.call_stack.len - 1];
+        }
         std.debug.panic("Native method call not supported yet: {s} {s}", .{ this.class.class_file.this_class, std.json.fmt(method_info, .{}) });
     }
     if (method_info.access_flags.abstract) {
@@ -151,31 +157,34 @@ fn enterMethod(self: *Self, this: ThisObject, method_id: u32) !*MethodFrame {
 
 fn leaveMethod(self: *Self) ?*MethodFrame { // returns the next frame
     var top = self.call_stack.pop();
+    std.log.debug("Popping method frame {s}.{s}", .{ top.this.getClass().class_file.this_class, top.method_info.name });
     top.deinit(self.vm_stack_alloc);
     if (self.call_stack.len == 0) {
+        std.log.info("Interpreter finished execution", .{});
         return null;
     }
+    std.log.debug("Returning to {s}.{s}", .{ self.call_stack.buffer[self.call_stack.len - 1].this.getClass().class_file.this_class, self.call_stack.buffer[self.call_stack.len - 1].method_info.name });
     return &self.call_stack.buffer[self.call_stack.len - 1];
 }
 
 pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_id: u32) !void {
     _ = driver; // TODO: Use for fetching new classes
     const initial_method = &this.getClass().class_file.methods[initial_method_id];
-    std.log.info("Interpreter started method call {s}.{s}", .{ &this.getClass().class_file.this_class, initial_method.name });
-    defer std.log.debug("Interpreter finished method call {s}.{s}", .{ this.getClass().class_file.this_class, initial_method.name });
+    std.log.info("Push native stack method frame {s}.{s}", .{ this.getClass().class_file.this_class, initial_method.name });
+    defer std.log.debug("Pop native stack method frame {s}.{s}", .{ this.getClass().class_file.this_class, initial_method.name });
 
     var frame: *MethodFrame = try self.enterMethod(this, initial_method_id);
     var depth: u32 = 1;
 
     while (depth > 0) {
         frame.verify();
-        std.log.debug("\tframe_ptr: 0x{X} frame pc: {} code size: {}", .{ @intFromPtr(frame), frame.pc, frame.code.len });
+        // std.log.debug("frame_ptr: 0x{X} frame pc: {} code size: {}", .{ @intFromPtr(frame), frame.pc, frame.code.len });
 
         const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
-        std.log.debug("\texecuting instr:{}", .{std.json.fmt(decoded.i, .{})});
+        std.log.debug("Executing instr: {} pc: {} code_size: {}, depth: {}, frame_ptr: {}", .{ std.json.fmt(decoded.i, .{}), frame.pc, frame.code.len, depth, @intFromPtr(frame) });
 
-        std.log.debug("\tlocals: {any}", .{frame.locals});
-        std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
+        // std.log.debug("\tlocals: {any}", .{frame.locals});
+        // std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
         switch (decoded.i) {
             .aload => |instr| {
                 frame.op_stack.append(frame.locals[instr.index]) catch unreachable;
@@ -270,8 +279,10 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 frame.pc += decoded.sz;
                 const prev_frame = frame;
                 const method = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).method;
+                std.log.info("from method {s}.{s} calling static method {s}.{s}", .{ prev_frame.this.getClass().class_file.this_class, prev_frame
+                    .method_info.name, method.class.class_file.this_class, method.class.class_file.methods[method.method_id].name });
                 frame = try enterMethod(self, .{ .class = method.class }, method.method_id);
-                depth += 1;
+                depth += if (prev_frame != frame) 1 else 0; // if we are in the same frame, then no need to increment depth
                 // move arguments from stack to locals
                 var total_slots: u32 = 0; // TODO: precalc
                 for (method.args) |arg| {
@@ -290,6 +301,43 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                     std.log.debug("\t\targ: {any}", .{frame.locals[this_local_offset]});
                     locals_offset += arg.slotsCount();
                 }
+            },
+            // TODO: Unify with invokestatic. there is some duplication
+            .invokespecial => |instr| {
+                frame.pc += decoded.sz;
+                const prev_frame = frame;
+                std.log.info("from method {s}.{s} pc {} calling special of {s}", .{ prev_frame.this.getClass().class_file.this_class, prev_frame.method_info.name, frame.pc - decoded.sz, prev_frame.this.getClass().class_file.this_class });
+                const cp_ent = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index);
+                switch (cp_ent) {
+                    .class => |cls| std.log.info("resolved entry: {s}", .{cls.class_file.this_class}),
+                    else => {},
+                }
+                const method = cp_ent.method;
+                // std.log.info("\t\tinvoking special method {s}.{s}", .{ method.class.class_file.this_class, method.class.class_file.methods[method.method_id].name });
+                frame = try enterMethod(self, .{ .object = prev_frame.op_stack.items[prev_frame.op_stack.items.len - 1 - method.args.len].reference.class.clone() }, method.method_id);
+                depth += if (prev_frame != frame) 1 else 0; // if we are in the same frame, then no need to increment depth
+                // move arguments from stack to locals
+                var total_slots: u32 = 0; // TODO: precalc
+                for (method.args) |arg| {
+                    total_slots += arg.slotsCount();
+                }
+                var locals_offset: u32 = 0;
+                for (method.args) |arg| {
+                    const this_local_offset = total_slots - locals_offset - arg.slotsCount();
+                    frame.locals[this_local_offset] = prev_frame.op_stack.pop();
+                    _ = prev_frame.op_stack_is_ref.pop(); // not touching it at all
+                    if (arg == u.Ty.reference) {
+                        frame.locals_is_ref.set(this_local_offset);
+                    } else {
+                        frame.locals_is_ref.unset(this_local_offset);
+                    }
+                    std.log.debug("\t\targ: {any}", .{frame.locals[this_local_offset]});
+                    locals_offset += arg.slotsCount();
+                }
+
+                // pop objref
+                _ = prev_frame.op_stack.pop();
+                _ = prev_frame.op_stack_is_ref.pop();
             },
             .if_icmp_ge => |instr| {
                 const b = frame.op_stack.pop().int;

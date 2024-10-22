@@ -26,6 +26,7 @@ pub const Instr = union(enum) {
     idiv: struct {},
     i2l: struct {},
     invokestatic: struct { index: u16 },
+    invokespecial: struct { index: u16 },
     if_icmp_ge: ICmp(struct {
         fn cmp(a: i32, b: i32) bool {
             return a >= b;
@@ -75,6 +76,7 @@ pub fn decodeInstruction(data: []const u8) struct { i: Instr, sz: u8 } {
         0x6c => return .{ .i = Instr{ .idiv = .{} }, .sz = 1 },
         0x85 => return .{ .i = Instr{ .i2l = .{} }, .sz = 1 },
         0xb8 => return .{ .i = Instr{ .invokestatic = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
+        0xb7 => return .{ .i = Instr{ .invokespecial = .{ .index = @byteSwap(@as(u16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         0xa2 => return .{ .i = Instr{ .if_icmp_ge = .{ .offset = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },
         0x84 => return .{ .i = Instr{ .iinc = .{ .index = data[1], .value = @intCast(data[2]) } }, .sz = 3 },
         0xa7 => return .{ .i = Instr{ .goto = .{ .offset = @byteSwap(@as(i16, @bitCast(@as([2]u8, data[1..3].*)))) } }, .sz = 3 },

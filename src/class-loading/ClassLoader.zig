@@ -37,10 +37,10 @@ fn loadFromDir(self: *Self, path_to_dir: []const u8, class_name: []const u8) !Ra
 
 fn loadFromDirs(self: *Self, class_name: []const u8) !RawClassFile {
     for (self.paths) |path| {
-        std.log.debug("Loading class {s} from path {s}:", .{ class_name, path });
+        // std.log.debug("Loading class {s} from path {s}:", .{ class_name, path });
         return self.loadFromDir(path, class_name) catch |err| {
             if (err == std.fs.File.OpenError.FileNotFound) {
-                std.log.debug("\tNot found {s} at {s}", .{ class_name, path });
+                // std.log.debug("\tNot found {s} at {s}", .{ class_name, path });
                 continue;
             }
             return err;

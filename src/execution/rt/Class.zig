@@ -104,6 +104,7 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
         const cp_info = self.class_file.constant_pool[constant_pool_id];
         switch (cp_info) {
             .FieldRef => |fr| {
+                std.log.debug("Resolving field_ref for {s}", .{self.class_file.this_class});
                 if (std.mem.eql(u8, fr.class_name, self.class_file.this_class)) {
                     // TODO: Check fr.name_and_type_index maybe?
                     const ty = u.Ty.fromDescriptor(fr.descriptor[0]);
@@ -129,12 +130,13 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
                 std.debug.panic("FieldRef not found in other class: {s}.{s}", .{ fr.class_name, fr.name });
             },
             .MethodRef => |mr| {
+                std.log.debug("Resolving method_ref for {s}", .{self.class_file.this_class});
                 // cycle through our methods and try to find the desired one
                 for (self.class_file.methods, 0..self.class_file.methods.len) |method, idx| {
                     if (std.mem.eql(u8, method.name, mr.name) and std.mem.eql(u8, method.descriptor, mr.descriptor)) {
-                        if (!method.access_flags.static) {
-                            std.debug.panic("MethodRef to non-static method is not supported: {s}.{s}", .{ mr.class_name, mr.name });
-                        }
+                        // if (!method.access_flags.static) {
+                        //     std.debug.panic("MethodRef to non-static method is not supported: {s}.{s}", .{ mr.class_name, mr.name });
+                        // }
                         const parsed = u.parseMethodDescriptor(self.allocator, mr.descriptor) catch unreachable; // TODO: Recover with exception
                         break :blk .{ .method = .{
                             .class = self,
@@ -181,11 +183,14 @@ pub fn resolveConstantPoolEntry(self: *Self, constant_pool_id: u32) ResolvedCPEn
                 break :blk .{ .value = .{ .v = v, .ty = u.Ty.reference } };
             },
             .ClassInfo => |class_info| {
+                std.log.debug("Resolving class_info {s} for {s}", .{ class_info, self.class_file.this_class });
                 if (std.mem.eql(u8, class_info, self.class_file.this_class)) {
+                    std.log.debug("Resolving class_info for {s} is self", .{self.class_file.this_class});
                     break :blk .{ .class = self };
                 }
 
                 const other_class = self.driver.resolveClass(class_info) catch unreachable; // TODO: Recover with exception
+                std.log.debug("Resolving class_info for {s} is other", .{class_info});
                 break :blk .{ .class = other_class };
             },
             else => std.debug.panic("Resolving this constant pool entry is not implemented yet: {}", .{cp_info}),
