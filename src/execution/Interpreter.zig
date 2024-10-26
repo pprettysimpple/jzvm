@@ -6,6 +6,7 @@ const Class = @import("rt/Class.zig");
 const Object = @import("rt/Object.zig");
 const Heap = @import("rt/Heap.zig");
 const string = @import("string.zig");
+const Array = @import("rt/Array.zig");
 const decoder = @import("decoder.zig");
 const u = @import("../common.zig");
 const Instr = decoder.Instr;
@@ -118,6 +119,29 @@ const MethodFrame = struct {
         std.debug.assert(self.locals.len == self.locals_is_ref.capacity());
         std.debug.assert(self.op_stack.items.len == self.op_stack_is_ref.bit_len);
     }
+
+    pub fn pushValue(self: *MethodFrame, value: u.Value, comptime opts: enum { ref, nonref }) void {
+        self.op_stack.append(value) catch unreachable;
+        self.op_stack_is_ref.push(if (opts == .ref) 1 else 0) catch unreachable;
+    }
+
+    pub fn popValue(self: *MethodFrame) u.Value {
+        const value = self.op_stack.pop();
+        _ = self.op_stack_is_ref.pop();
+        return value;
+    }
+
+    pub fn moveToLocal(self: *MethodFrame, idx: u32, value: u.Value, comptime opts: enum { ref, nonref }) void {
+        if (self.locals_is_ref.isSet(idx)) {
+            self.locals[idx].reference.deinit();
+        }
+        self.locals[idx] = value;
+        if (opts == .ref) {
+            self.locals_is_ref.set(idx);
+        } else {
+            self.locals_is_ref.unset(idx);
+        }
+    }
 };
 
 pub fn init(vm_alloc: std.mem.Allocator) Self {
@@ -167,6 +191,28 @@ fn leaveMethod(self: *Self) ?*MethodFrame { // returns the next frame
     return &self.call_stack.buffer[self.call_stack.len - 1];
 }
 
+fn interpretICmp(frame: *MethodFrame, instr: anytype, sz: u32) void {
+    const InstrType = @TypeOf(instr);
+    const b = frame.popValue().int;
+    const a = frame.popValue().int;
+    if (InstrType.cmp(a, b)) {
+        frame.pc = @intCast(@as(i32, @intCast(frame.pc)) + instr.offset);
+    } else {
+        frame.pc += sz;
+    }
+}
+
+fn interpretBiOp(frame: *MethodFrame, instr: anytype, sz: u32) void {
+    const InstrType = @TypeOf(instr);
+    const b = @field(frame.popValue(), InstrType.ty); //frame.popValue();
+    const a = @field(frame.popValue(), InstrType.ty); //frame.popValue();
+    var value: u.Value = undefined;
+    @field(value, InstrType.ty) = InstrType.op(a, b);
+    frame.op_stack.append(value) catch unreachable;
+    _ = frame.op_stack_is_ref.pop(); // optimization: no need to pop/push same value
+    frame.pc += sz;
+}
+
 pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_id: u32) !void {
     _ = driver; // TODO: Use for fetching new classes
     const initial_method = &this.getClass().class_file.methods[initial_method_id];
@@ -183,12 +229,11 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
         const decoded = decoder.decodeInstruction(frame.code[frame.pc..]);
         std.log.debug("Executing instr: {} pc: {} code_size: {}, depth: {}, frame_ptr: {}", .{ std.json.fmt(decoded.i, .{}), frame.pc, frame.code.len, depth, @intFromPtr(frame) });
 
-        // std.log.debug("\tlocals: {any}", .{frame.locals});
-        // std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
+        std.log.debug("\tlocals: {any}", .{frame.locals});
+        std.log.debug("\top_stack: {any}", .{frame.op_stack.items});
         switch (decoded.i) {
             .aload => |instr| {
-                frame.op_stack.append(frame.locals[instr.index]) catch unreachable;
-                frame.op_stack_is_ref.push(@bitCast(frame.locals_is_ref.isSet(instr.index))) catch unreachable;
+                frame.pushValue(.{ .reference = frame.locals[instr.index].reference.clone() }, .ref);
                 frame.pc += decoded.sz;
             },
             .@"return" => {
@@ -201,78 +246,53 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 frame = self.leaveMethod() orelse return; // last frame popped => main finished
                 depth -= 1;
                 // here we have new frame
-                frame.op_stack.append(value) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                frame.pushValue(value, .nonref);
             },
             .bipush => |instr| {
-                frame.op_stack.append(.{ .int = @intCast(instr.value) }) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                frame.pushValue(.{ .int = @intCast(instr.value) }, .nonref);
                 frame.pc += decoded.sz;
             },
             .sipush => |instr| {
-                frame.op_stack.append(.{ .int = instr.value }) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                frame.pushValue(.{ .int = instr.value }, .nonref);
                 frame.pc += decoded.sz;
             },
             .putstatic => |instr| {
-                const value = frame.op_stack.pop();
-                _ = frame.op_stack_is_ref.pop(); // passed to static field, so no need to deinit
-                frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).static_field.*.v = value;
+                const value = frame.popValue();
+                const field = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).static_field;
+                field.*.v = value;
                 frame.pc += decoded.sz;
             },
             .getstatic => |instr| {
                 const value = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).static_field.*;
-                frame.op_stack.append(value.v) catch unreachable;
-                frame.op_stack_is_ref.push(@bitCast(value.ty == u.Ty.reference)) catch unreachable;
+                if (value.ty == u.Ty.reference) {
+                    frame.pushValue(value.v, .ref);
+                } else {
+                    frame.pushValue(value.v, .nonref);
+                }
                 frame.pc += decoded.sz;
             },
             .istore => |instr| {
-                frame.locals[instr.index] = frame.op_stack.pop();
-                _ = frame.op_stack_is_ref.pop();
-                frame.locals_is_ref.unset(instr.index);
+                frame.moveToLocal(instr.index, frame.popValue(), .nonref);
                 frame.pc += decoded.sz;
             },
             .iconst => |instr| {
-                frame.op_stack.append(.{ .int = instr.value }) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                frame.pushValue(.{ .int = instr.value }, .nonref);
                 frame.pc += decoded.sz;
             },
             .iload => |instr| {
-                frame.op_stack.append(frame.locals[instr.index]) catch unreachable;
-                frame.op_stack_is_ref.push(0) catch unreachable;
+                frame.pushValue(frame.locals[instr.index], .nonref);
                 frame.pc += decoded.sz;
             },
-            .iadd => {
-                const a = frame.op_stack.pop().int;
-                const b = frame.op_stack.pop().int;
-                frame.op_stack.append(.{ .int = a +% b }) catch unreachable;
-                _ = frame.op_stack_is_ref.pop(); // optimization: no need to pop/push same value
-                frame.pc += decoded.sz;
-            },
-            .imul => {
-                const a = frame.op_stack.pop().int;
-                const b = frame.op_stack.pop().int;
-                frame.op_stack.append(.{ .int = a *% b }) catch unreachable;
-                _ = frame.op_stack_is_ref.pop();
-                frame.pc += decoded.sz;
-            },
-            .idiv => {
-                const b = frame.op_stack.pop().int;
-                const a = frame.op_stack.pop().int;
-                // TODO: Check for division by zero and set exception
-                if (b == -1) {
-                    // Instructions 6.5 idiv
-                    frame.op_stack.append(.{ .int = b }) catch unreachable;
-                } else {
-                    // for zig's @divTrunc -1 is UB
-                    frame.op_stack.append(.{ .int = @divTrunc(a, b) }) catch unreachable;
-                }
-                _ = frame.op_stack_is_ref.pop(); // optimization: no need to pop/push same value
-                frame.pc += decoded.sz;
-            },
+            .iadd => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .isub => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .imul => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .idiv => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .dadd => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .dsub => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .dmul => |instr| interpretBiOp(frame, instr, decoded.sz),
+            .ddiv => |instr| interpretBiOp(frame, instr, decoded.sz),
             .i2l => { // int to long with sign extension
-                const value = frame.op_stack.pop();
-                frame.op_stack.append(value.cast(.int, .long)) catch unreachable;
+                frame.pushValue(frame.popValue().cast(.int, .long), .nonref);
                 frame.pc += decoded.sz;
             },
             .invokestatic => |instr| {
@@ -339,17 +359,12 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 _ = prev_frame.op_stack.pop();
                 _ = prev_frame.op_stack_is_ref.pop();
             },
-            .if_icmp_ge => |instr| {
-                const b = frame.op_stack.pop().int;
-                const a = frame.op_stack.pop().int;
-                _ = frame.op_stack_is_ref.pop();
-                _ = frame.op_stack_is_ref.pop();
-                if (a >= b) {
-                    frame.pc = @intCast(@as(i32, @intCast(frame.pc)) + instr.offset);
-                } else {
-                    frame.pc += decoded.sz;
-                }
-            },
+            .if_icmp_ge => |instr| interpretICmp(frame, instr, decoded.sz),
+            .if_icmp_eq => |instr| interpretICmp(frame, instr, decoded.sz),
+            .if_icmp_ne => |instr| interpretICmp(frame, instr, decoded.sz),
+            .if_icmp_lt => |instr| interpretICmp(frame, instr, decoded.sz),
+            .if_icmp_le => |instr| interpretICmp(frame, instr, decoded.sz),
+            .if_icmp_gt => |instr| interpretICmp(frame, instr, decoded.sz),
             .iinc => |instr| {
                 std.debug.assert(!frame.locals_is_ref.isSet(instr.index));
                 const val = frame.locals[instr.index].int;
@@ -364,8 +379,11 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 const cp_info = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index);
                 switch (cp_info) {
                     .value => |value| {
-                        frame.op_stack.append(value.v) catch unreachable;
-                        frame.op_stack_is_ref.push(@bitCast(value.ty == u.Ty.reference)) catch unreachable;
+                        if (value.ty == u.Ty.reference) {
+                            frame.pushValue(value.v, .ref);
+                        } else {
+                            frame.pushValue(value.v, .nonref);
+                        }
                     },
                     else => {
                         std.debug.panic("Unsupported constant pool entry for ldc: {}", .{cp_info});
@@ -373,13 +391,15 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 }
             },
             .astore => |instr| {
-                frame.locals[instr.index] = frame.op_stack.pop();
-                const is_ref = frame.op_stack_is_ref.pop();
-                if (is_ref == 1) {
-                    frame.locals_is_ref.set(instr.index);
-                } else {
-                    frame.locals_is_ref.unset(instr.index);
-                }
+                frame.moveToLocal(instr.index, frame.popValue(), .ref);
+                frame.pc += decoded.sz;
+            },
+            .iastore => {
+                const value = frame.popValue().int;
+                const index = frame.popValue().int;
+                const array_ref = frame.popValue().reference.array;
+                array_ref.ptr().?.items[@intCast(index)] = .{ .int = value };
+                array_ref.deinit(); // ref popped
                 frame.pc += decoded.sz;
             },
             .new => |instr| {
@@ -387,8 +407,26 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                 const class = frame.this.getClass().cachedResolveConstantPoolEntry(instr.index).class;
                 const object = Object.init(class, self.vm_alloc) catch unreachable; // TODO: Recover with exception
                 const object_ref = Heap.Ref(Object).init(object) catch unreachable; // TODO: Recover with exception
-                frame.op_stack.append(.{ .reference = .{ .class = object_ref } }) catch unreachable;
-                frame.op_stack_is_ref.push(1) catch unreachable;
+                frame.pushValue(.{ .reference = .{ .class = object_ref } }, .ref);
+            },
+            .newarray => |instr| {
+                frame.pc += decoded.sz;
+                const count = frame.popValue().int;
+                const atype = instr.atype;
+                const array = Array.init(Heap.allocator, switch (atype) {
+                    4 => u.Ty.boolean,
+                    5 => u.Ty.char,
+                    6 => u.Ty.float,
+                    7 => u.Ty.double,
+                    8 => u.Ty.byte,
+                    9 => u.Ty.short,
+                    10 => u.Ty.int,
+                    11 => u.Ty.long,
+                    else => std.debug.panic("Unsupported atype: {}", .{atype}),
+                }, @intCast(count)) catch unreachable; // TODO: alloc error
+
+                const ref = Heap.Ref(Array).init(array) catch unreachable; // TODO: alloc error
+                frame.pushValue(.{ .reference = .{ .array = ref } }, .ref);
             },
             .dup => {
                 const value = frame.op_stack.getLast();
@@ -399,6 +437,24 @@ pub fn runMethod(self: *Self, driver: *Driver, this: ThisObject, initial_method_
                     frame.op_stack.append(value) catch unreachable;
                 }
                 frame.op_stack_is_ref.push(is_ref) catch unreachable;
+                frame.pc += decoded.sz;
+            },
+            .aconst_null => {
+                frame.op_stack.append(.{ .reference = .{ .class = Heap.Ref(Object).initNull() } }) catch unreachable;
+                frame.op_stack_is_ref.push(1) catch unreachable;
+                frame.pc += decoded.sz;
+            },
+            .arraylength => {
+                const array_ref = frame.popValue().reference.array;
+                frame.pushValue(.{ .int = @intCast(array_ref.ptr().?.items.len) }, .nonref);
+                array_ref.deinit(); // ref popped
+                frame.pc += decoded.sz;
+            },
+            .iaload => {
+                const index = frame.popValue().int;
+                const array_ref = frame.popValue().reference.array;
+                frame.pushValue(array_ref.ptr().?.items[@intCast(index)], .nonref);
+                array_ref.deinit(); // ref popped
                 frame.pc += decoded.sz;
             },
         }

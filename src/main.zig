@@ -27,7 +27,15 @@ pub fn main() !void {
 
     const err_writer = std.io.getStdErr().writer();
 
-    const hardcoded_paths = [_][]const u8{ "/home/pprettysimpple/prjs/jzvm/data", "/home/pprettysimpple/prjs/jzvm/userdata", "/home/pprettysimpple/Downloads/server" };
+    var cwd_path_buf: [512]u8 = undefined;
+    var cwd_data_path_buf: [512]u8 = undefined;
+    var cwd_userdata_path_buf: [512]u8 = undefined;
+    const hardcoded_paths = [_][]const u8{
+        try std.fs.cwd().realpath("data", &cwd_data_path_buf),
+        try std.fs.cwd().realpath("userdata", &cwd_userdata_path_buf),
+        try std.fs.cwd().realpath(".", &cwd_path_buf),
+        "/home/pprettysimpple/Downloads/server",
+    };
 
     var class_loader = cl.ClassLoader.init(vm_alloc, &hardcoded_paths);
     var driver = exe.Driver.init(vm_alloc, heap_alloc, &class_loader);
@@ -39,8 +47,8 @@ pub fn main() !void {
     // };
 
     const class_with_main = driver.resolveClass(args[1]) catch |err| switch (err) {
-        error.ClassNotFound => {
-            try err_writer.print("Class {s} was not found: {s}", .{ args[1], @errorName(err) });
+        error.ClassFileNotFound => {
+            try err_writer.print("Class {s} was not found", .{args[1]});
             return;
         },
         else => return err,
