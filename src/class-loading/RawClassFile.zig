@@ -46,6 +46,12 @@ const RawCPInfo = union(enum) {
     },
 };
 
+pub const FieldRef = struct {
+    class_name: []const u8,
+    name: []const u8,
+    descriptor: []const u8,
+};
+
 // same as RawCPInfo, but without indexes, just slices
 pub const CPInfo = union(enum) {
     Undefined: struct {},
@@ -56,11 +62,7 @@ pub const CPInfo = union(enum) {
     Double: u.Ty.Double,
     ClassInfo: []const u8,
     String: []const u8,
-    FieldRef: struct {
-        class_name: []const u8,
-        name: []const u8,
-        descriptor: []const u8,
-    },
+    FieldRef: FieldRef,
     MethodRef: struct {
         class_name: []const u8,
         name: []const u8,
@@ -87,11 +89,12 @@ pub const CPInfo = union(enum) {
     },
 };
 
-const FieldInfo = struct {
+pub const FieldInfo = struct {
     access_flags: u.FieldAccessFlags,
     name: []const u8,
     descriptor: []const u8,
     attributes: []const Attribute,
+    ty: u.Ty,
 };
 
 pub const MethodInfo = struct {
@@ -135,31 +138,31 @@ pub const Attribute = struct {
         Annotations: []const Annotation,
     },
 
-    fn read(reader: std.io.AnyReader, allocator: std.mem.Allocator, constant_pool: []const CPInfo) !Attribute {
-        const attribute_name_index = try reader.readInt(u16, u.endian);
-        const attribute_length = try reader.readInt(u32, u.endian);
+    fn read(reader: std.io.AnyReader, allocator: std.mem.Allocator, constant_pool: []const CPInfo) error{ OutOfMemory, BadClassFile }!Attribute {
+        const attribute_name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const attribute_length = reader.readInt(u32, u.endian) catch return error.BadClassFile;
         const name = constant_pool[attribute_name_index].Utf8;
         if (std.mem.eql(u8, name, "ConstantValue")) {
-            const constant_value_index = try reader.readInt(u16, u.endian);
+            const constant_value_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
             return Attribute{
                 .name = name,
                 .info = .{ .ConstantValue = .{ .value = constant_pool[constant_value_index] } },
             };
         } else if (std.mem.eql(u8, name, "Code")) {
-            const max_stack = try reader.readInt(u16, u.endian);
-            const max_locals = try reader.readInt(u16, u.endian);
-            const code_length = try reader.readInt(u32, u.endian);
+            const max_stack = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+            const max_locals = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+            const code_length = reader.readInt(u32, u.endian) catch return error.BadClassFile;
             const code = try allocator.alloc(u8, code_length);
-            if (try reader.readAll(code) != code_length) {
-                return error.CorruptedData;
+            if ((reader.readAll(code) catch return error.BadClassFile) != code_length) {
+                return error.BadClassFile;
             }
-            const exception_table_length = try reader.readInt(u16, u.endian);
+            const exception_table_length = reader.readInt(u16, u.endian) catch return error.BadClassFile;
             const exception_table = try allocator.alloc(ExceptionTableEntry, exception_table_length);
             for (exception_table) |*entry| {
-                const start_pc = try reader.readInt(u16, u.endian);
-                const end_pc = try reader.readInt(u16, u.endian);
-                const handler_pc = try reader.readInt(u16, u.endian);
-                const catch_type = try reader.readInt(u16, u.endian);
+                const start_pc = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const end_pc = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const handler_pc = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const catch_type = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 entry.* = ExceptionTableEntry{
                     .start_pc = start_pc,
                     .end_pc = end_pc,
@@ -167,7 +170,7 @@ pub const Attribute = struct {
                     .catch_type = catch_type,
                 };
             }
-            const attributes_count = try reader.readInt(u16, u.endian);
+            const attributes_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
             const attributes = try allocator.alloc(Attribute, attributes_count);
             for (attributes) |*attribute| {
                 attribute.* = try Attribute.read(reader, allocator, constant_pool);
@@ -185,23 +188,23 @@ pub const Attribute = struct {
             };
         } else if (std.mem.eql(u8, name, "Signature") or std.mem.eql(u8, name, "StackMapTable") or std.mem.eql(u8, name, "Exceptions") or std.mem.eql(u8, name, "Deprecated") or std.mem.eql(u8, name, "LineNumberTable")) {
             // unsupported
-            try reader.skipBytes(attribute_length, .{});
+            reader.skipBytes(attribute_length, .{}) catch return error.BadClassFile;
             // std.log.warn("unsupported attribute: {s}", .{name});
             return Attribute{
                 .name = name,
                 .info = .{ .Unsupported = .{} },
             };
         } else if (std.mem.eql(u8, name, "RuntimeVisibleAnnotations")) {
-            const num_annotations = try reader.readInt(u16, u.endian);
+            const num_annotations = reader.readInt(u16, u.endian) catch return error.BadClassFile;
             const annotations = try allocator.alloc(Annotation, num_annotations);
             errdefer allocator.free(annotations);
             for (annotations) |*annotation| {
-                const type_index = try reader.readInt(u16, u.endian);
+                const type_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 const type_descriptor = constant_pool[type_index].Utf8;
-                const num_element_value_pairs = try reader.readInt(u16, u.endian);
+                const num_element_value_pairs = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 const element_value_pairs = try allocator.alloc(Annotation.ElementValue, num_element_value_pairs);
                 for (element_value_pairs) |*pair| {
-                    const element_name_index = try reader.readInt(u16, u.endian);
+                    const element_name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                     const element_name = constant_pool[element_name_index].Utf8;
                     pair.* = .{ .name = element_name, .value = .{} };
                 }
@@ -229,7 +232,7 @@ minor_version: u16,
 major_version: u16,
 access_flags: u.ClassAccessFlags,
 this_class: []const u8,
-super_class: []const u8,
+super_class: ?[]const u8,
 constant_pool: []const CPInfo,
 interfaces: []const u16,
 fields: []const FieldInfo,
@@ -259,25 +262,25 @@ const Reader = struct {
 };
 
 /// Reads a class file from a reader and returns Self.
-pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
+pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) error{ OutOfMemory, BadClassFile }!Self {
     // allocate in arena
     var arena = std.heap.ArenaAllocator.init(user_allocator);
     errdefer arena.deinit(); // in case of error, deallocate the whole arena
     const allocator = arena.allocator();
 
-    const magic = try reader.readInt(u32, u.endian);
+    const magic = reader.readInt(u32, u.endian) catch return error.BadClassFile;
     if (magic != 0xCAFEBABE) {
         std.log.err("invalid magic number: 0x{X}", .{magic});
-        return error.InvalidMagicNumber;
+        return error.BadClassFile;
     }
-    const minor_version = try reader.readInt(u16, u.endian);
-    const major_version = try reader.readInt(u16, u.endian);
+    const minor_version = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+    const major_version = reader.readInt(u16, u.endian) catch return error.BadClassFile;
 
-    std.log.debug("version: {d}.{d}", .{ major_version, minor_version });
+    // std.log.debug("version: {d}.{d}", .{ major_version, minor_version });
 
     // first, we extract only sizes of all structures, then alloc, then read again
-    const constant_pool_count = try reader.readInt(u16, u.endian);
-    std.log.debug("constant_pool_count: {d}", .{constant_pool_count});
+    const constant_pool_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+    // std.log.debug("constant_pool_count: {d}", .{constant_pool_count});
     // temporary storage
     const raw_constant_pool = try user_allocator.alloc(RawCPInfo, constant_pool_count);
     defer user_allocator.free(raw_constant_pool);
@@ -285,64 +288,68 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
     var i: u32 = 1;
     while (i < constant_pool_count) : (i += 1) {
         const cp_info = &raw_constant_pool[i];
-        const tag = try reader.readInt(u8, u.endian);
+        const tag = reader.readInt(u8, u.endian) catch return error.BadClassFile;
         cp_info.* = switch (tag) {
             0 => RawCPInfo{ .Undefined = .{} },
             1 => blk: {
-                const len = try reader.readInt(u16, u.endian);
-                const bytes = try allocator.alloc(u8, len);
-                if (try reader.read(bytes) != len) {
-                    return error.CorruptedData;
+                const len = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const bytes = allocator.alloc(u8, len) catch return error.BadClassFile;
+                if ((reader.read(bytes) catch return error.BadClassFile) != len) {
+                    return error.BadClassFile;
                 }
                 break :blk RawCPInfo{ .Utf8 = bytes };
             },
             10 => blk: {
-                const class_index = try reader.readInt(u16, u.endian);
-                const name_and_type_index = try reader.readInt(u16, u.endian);
+                const class_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const name_and_type_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .MethodRef = .{ .class_index = class_index, .name_and_type_index = name_and_type_index } };
             },
             7 => blk: {
-                const name_index = try reader.readInt(u16, u.endian);
+                const name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .ClassInfo = .{ .name_index = name_index } };
             },
             12 => blk: {
-                const name_index = try reader.readInt(u16, u.endian);
-                const descriptor_index = try reader.readInt(u16, u.endian);
+                const name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const descriptor_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .NameAndType = .{ .name_index = name_index, .descriptor_index = descriptor_index } };
             },
             9 => blk: {
-                const class_index = try reader.readInt(u16, u.endian);
-                const name_and_type_index = try reader.readInt(u16, u.endian);
+                const class_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const name_and_type_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .FieldRef = .{ .class_index = class_index, .name_and_type_index = name_and_type_index } };
             },
             8 => blk: {
-                const string_index = try reader.readInt(u16, u.endian);
+                const string_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .String = .{ .string_index = string_index } };
             },
             3 => blk: {
-                const value = try reader.readInt(i32, u.endian);
+                const value = reader.readInt(i32, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .Integer = value };
             },
             5 => blk: {
-                const high_bytes: u64 = @byteSwap(try reader.readInt(u32, u.endian));
-                const low_bytes: u64 = @byteSwap(try reader.readInt(u32, u.endian));
+                const high_bytes: u64 = @byteSwap(reader.readInt(u32, u.endian) catch return error.BadClassFile);
+                const low_bytes: u64 = @byteSwap(reader.readInt(u32, u.endian) catch return error.BadClassFile);
                 const bits = (high_bytes << 32) | low_bytes;
                 i += 1;
                 raw_constant_pool[i] = .Undefined;
                 break :blk RawCPInfo{ .Long = @bitCast(bits) };
             },
             6 => blk: {
-                const high_bytes: u64 = @byteSwap(try reader.readInt(u32, u.endian));
-                const low_bytes: u64 = @byteSwap(try reader.readInt(u32, u.endian));
+                const high_bytes: u64 = @byteSwap(reader.readInt(u32, u.endian) catch return error.BadClassFile);
+                const low_bytes: u64 = @byteSwap(reader.readInt(u32, u.endian) catch return error.BadClassFile);
                 const bits = (high_bytes << 32) | low_bytes;
                 i += 1;
                 raw_constant_pool[i] = .Undefined;
                 break :blk RawCPInfo{ .Double = @bitCast(bits) };
             },
             11 => blk: {
-                const class_index = try reader.readInt(u16, u.endian);
-                const name_and_type_index = try reader.readInt(u16, u.endian);
+                const class_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+                const name_and_type_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
                 break :blk RawCPInfo{ .InterfaceMethodRef = .{ .class_index = class_index, .name_and_type_index = name_and_type_index } };
+            },
+            4 => blk: {
+                const value: f32 = @bitCast(reader.readInt(i32, u.endian) catch return error.BadClassFile);
+                break :blk RawCPInfo{ .Float = value };
             },
             else => {
                 std.debug.panic("tried to handle constant pool tag {d}", .{tag});
@@ -422,33 +429,32 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
         };
     }
 
-    const access_flags: u.ClassAccessFlags = @bitCast(try reader.readInt(u16, u.endian));
+    const access_flags: u.ClassAccessFlags = @bitCast(reader.readInt(u16, u.endian) catch return error.BadClassFile);
 
-    const this_class_index = try reader.readInt(u16, u.endian);
+    const this_class_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
     const this_class = constant_pool[this_class_index].ClassInfo;
 
-    const super_class_index = try reader.readInt(u16, u.endian);
-    const super_class = blk: {
-        if (super_class_index == 0)
-            break :blk &[0]u8{};
-        break :blk constant_pool[super_class_index].ClassInfo;
-    };
+    const super_class_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+    var super_class: ?[]const u8 = null;
+    if (super_class_index != 0) {
+        super_class = constant_pool[super_class_index].ClassInfo;
+    }
 
-    const interfaces_count = try reader.readInt(u16, u.endian);
+    const interfaces_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
     const interfaces = try allocator.alloc(u16, interfaces_count);
-    std.log.debug("interfaces_count: {d}", .{interfaces_count});
+    // std.log.debug("interfaces_count: {d}", .{interfaces_count});
     for (interfaces) |*interface| {
-        interface.* = try reader.readInt(u16, u.endian);
+        interface.* = reader.readInt(u16, u.endian) catch return error.BadClassFile;
         // std.log.debug("\tinterface: {d}", .{interface.*});
     }
-    const fields_count = try reader.readInt(u16, u.endian);
-    std.log.debug("fields_count: {d}", .{fields_count});
+    const fields_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+    // std.log.debug("fields_count: {d}", .{fields_count});
     const fields = try allocator.alloc(FieldInfo, fields_count);
     for (fields) |*field| {
-        const field_access_flags: u.FieldAccessFlags = @bitCast(try reader.readInt(u16, u.endian));
-        const name_index = try reader.readInt(u16, u.endian);
-        const descriptor_index = try reader.readInt(u16, u.endian);
-        const attributes_count = try reader.readInt(u16, u.endian);
+        const field_access_flags: u.FieldAccessFlags = @bitCast(reader.readInt(u16, u.endian) catch return error.BadClassFile);
+        const name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const descriptor_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const attributes_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
         const attributes = try allocator.alloc(Attribute, attributes_count);
         for (attributes) |*attribute| {
             attribute.* = try Attribute.read(reader, allocator, constant_pool);
@@ -459,17 +465,18 @@ pub fn read(reader: std.io.AnyReader, user_allocator: std.mem.Allocator) !Self {
             .name = constant_pool[name_index].Utf8,
             .descriptor = constant_pool[descriptor_index].Utf8,
             .attributes = attributes,
+            .ty = u.Ty.fromDescriptor(constant_pool[descriptor_index].Utf8[0]),
         };
         // std.log.debug("{}", .{std.json.fmt(field.*, .{})});
     }
-    const methods_count = try reader.readInt(u16, u.endian);
-    std.log.debug("methods_count: {d}", .{methods_count});
+    const methods_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+    // std.log.debug("methods_count: {d}", .{methods_count});
     const methods = try allocator.alloc(MethodInfo, methods_count);
     for (methods) |*method| {
-        const method_access_flags = try reader.readInt(u16, u.endian);
-        const name_index = try reader.readInt(u16, u.endian);
-        const descriptor_index = try reader.readInt(u16, u.endian);
-        const attributes_count = try reader.readInt(u16, u.endian);
+        const method_access_flags = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const name_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const descriptor_index = reader.readInt(u16, u.endian) catch return error.BadClassFile;
+        const attributes_count = reader.readInt(u16, u.endian) catch return error.BadClassFile;
         const attributes = try allocator.alloc(Attribute, attributes_count);
         for (attributes) |*attribute| {
             attribute.* = try Attribute.read(reader, allocator, constant_pool);

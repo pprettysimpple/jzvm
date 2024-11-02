@@ -12,10 +12,6 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn findMethod(class_name: []const u8, method_name: []const u8, method_descriptor: []const u8) void {
-    if (std.mem.eql(u8, method_name, "registerNatives")) {
-        return;
-    }
-
     // naming convention
     // package p.q.r;
     // class A {
@@ -38,12 +34,10 @@ pub fn findMethod(class_name: []const u8, method_name: []const u8, method_descri
         }
     }
     buf[n] = 0;
-    const sym_name = @as([:0]const u8, @ptrCast(buf[0..n]));
+    const sym_name = @as([*:0]const u8, @ptrCast(buf[0..n]));
 
     std.log.info("Going to call: {s}", .{sym_name});
-    var lib = std.DynLib.open("libjava.so") catch unreachable;
-    _ = lib.lookup(*anyopaque, sym_name) orelse unreachable;
-
+    _ = std.DynLib.open("libjava.so") catch unreachable;
     // lib.lookup(fn (), name: [:0]const u8)
     // const f: *const fn () void = @ptrCast(sym);
     // f();

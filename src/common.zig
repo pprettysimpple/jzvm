@@ -38,7 +38,7 @@ pub const Ty = enum {
             .float => .{ .float = 0 },
             .double => .{ .double = 0 },
             .boolean => .{ .boolean = false },
-            .reference => .{ .reference = .{ .class = Heap.Ref(Object).initNull() } },
+            .reference => .{ .reference = .{ .object = Heap.Ref(Object).initNull() } },
             .returnAddress => .{ .returnAddress = 0 },
         };
     }
@@ -76,26 +76,33 @@ pub const Ty = enum {
 };
 
 pub const RefTy = enum {
-    class,
+    object,
     array,
     // TODO: primitive maybe?
 };
 
 // most of the time, we want to know what type of reference it is
 pub const AnyRef = union(RefTy) {
-    class: Heap.Ref(Object),
+    object: Heap.Ref(Object),
     array: Heap.Ref(Array),
 
     pub fn clone(self: AnyRef) AnyRef {
         return switch (self) {
-            .class => .{ .class = self.class.clone() },
+            .object => .{ .object = self.object.clone() },
             .array => .{ .array = self.array.clone() },
+        };
+    }
+
+    pub fn isNull(self: AnyRef) bool {
+        return switch (self) {
+            .object => self.object.isNull(),
+            .array => self.array.isNull(),
         };
     }
 
     pub fn deinit(self: AnyRef) void {
         switch (self) {
-            .class => self.class.deinit(),
+            .object => self.object.deinit(),
             .array => self.array.deinit(),
         }
     }
@@ -280,7 +287,7 @@ pub fn parseFieldDescriptor(descriptor: []const u8) !struct {
     ty: Ty,
     rest: []const u8,
 } {
-    std.log.debug("parseFieldDescriptor: {s}", .{descriptor});
+    // std.log.debug("parseFieldDescriptor: {s}", .{descriptor});
     const first = descriptor[0];
     return switch (first) {
         'B' => .{ .ty = Ty.byte, .rest = descriptor[1..] },
@@ -336,11 +343,11 @@ pub fn parseMethodDescriptor(allocator: std.mem.Allocator, descriptor: []const u
     }
 
     if (return_ty == null) {
-        std.log.debug("parseMethodDescriptor: {s} has void return_ty and {d} args", .{ descriptor, nargs });
+        // std.log.debug("parseMethodDescriptor: {s} has void return_ty and {d} args", .{ descriptor, nargs });
         return .{ .return_ty = null, .args = args };
     }
 
-    std.log.debug("parseMethodDescriptor: {s} has return_ty: {} and {d} args", .{ descriptor, return_ty.?.ty, nargs });
+    // std.log.debug("parseMethodDescriptor: {s} has return_ty: {} and {d} args", .{ descriptor, return_ty.?.ty, nargs });
     return .{ .return_ty = return_ty.?.ty, .args = args };
 }
 

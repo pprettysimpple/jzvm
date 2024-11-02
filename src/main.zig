@@ -30,23 +30,23 @@ pub fn main() !void {
     var cwd_path_buf: [512]u8 = undefined;
     var cwd_data_path_buf: [512]u8 = undefined;
     var cwd_userdata_path_buf: [512]u8 = undefined;
+    var cwd_userdata_jre_unpacked_path_buf: [512]u8 = undefined;
     const hardcoded_paths = [_][]const u8{
         try std.fs.cwd().realpath("data", &cwd_data_path_buf),
         try std.fs.cwd().realpath("userdata", &cwd_userdata_path_buf),
+        try std.fs.cwd().realpath("userdata/jre1.8.0_431", &cwd_userdata_jre_unpacked_path_buf),
         try std.fs.cwd().realpath(".", &cwd_path_buf),
         "/home/pprettysimpple/Downloads/server",
     };
 
-    var class_loader = cl.ClassLoader.init(vm_alloc, &hardcoded_paths);
-    var driver = exe.Driver.init(vm_alloc, heap_alloc, &class_loader);
-    defer class_loader.deinit();
-    defer driver.deinit();
+    var booststrap_class_loader = cl.ClassLoader.init(vm_alloc, &hardcoded_paths);
+    defer booststrap_class_loader.deinit();
+    var interpreter = exe.Interpreter.init(vm_alloc, heap_alloc, &booststrap_class_loader);
+    interpreter.attachToThread(); // must be called after we have stable pointer on the interpreter
 
-    // driver.bootstrap() catch |err| {
-    //     try err_writer.print("Error during bootstrap: {s}", .{err});
-    // };
+    try exe.bootstrap(&booststrap_class_loader);
 
-    const class_with_main = driver.resolveClass(args[1]) catch |err| switch (err) {
+    const class_with_main = booststrap_class_loader.resolveClass(args[1]) catch |err| switch (err) {
         error.ClassFileNotFound => {
             try err_writer.print("Class {s} was not found", .{args[1]});
             return;
@@ -54,10 +54,10 @@ pub fn main() !void {
         else => return err,
     };
 
-    const main_method_id = class_with_main.resolveMethodInThisClass("main", "([Ljava/lang/String;)V") orelse {
+    const resolved_main = class_with_main.resolveMethodInThisClass("main", "([Ljava/lang/String;)V") orelse {
         try err_writer.print("Main method was not found for class {s}", .{args[1]});
         return;
     };
 
-    try driver.interpreter.runMethod(&driver, .{ .class = class_with_main }, main_method_id);
+    try interpreter.runMethod(exe.rt.Heap.Ref(exe.rt.Object).initNull(), resolved_main);
 }

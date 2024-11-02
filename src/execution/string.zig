@@ -1,11 +1,11 @@
 const std = @import("std");
-const Driver = @import("Driver.zig");
+const ClassLoader = @import("../class-loading/ClassLoader.zig");
 const Object = @import("rt/Object.zig");
 const Heap = @import("rt/Heap.zig");
 const Array = @import("rt/Array.zig");
 const u = @import("../common.zig");
 
-pub fn initFromUTF8(driver: *Driver, bytes: []const u8) !Heap.Ref(Object) {
+pub fn initFromUTF8(class_loader: *ClassLoader, bytes: []const u8) error{ OutOfMemory, InvalidUtf8 }!Heap.Ref(Object) {
     // convert utf8 to utf16
     const utf16 = try std.unicode.utf8ToUtf16LeAlloc(Heap.allocator, bytes);
     defer Heap.allocator.free(utf16);
@@ -17,7 +17,7 @@ pub fn initFromUTF8(driver: *Driver, bytes: []const u8) !Heap.Ref(Object) {
     }
 
     // make java/lang/String object and set its value field to the that array
-    const jlStringObj = try Object.init(try driver.resolveClass("java/lang/String"), Heap.allocator);
+    const jlStringObj = try Object.init(class_loader.resolveClass("java/lang/String") catch unreachable, Heap.allocator);
     const ref = try Heap.Ref(Object).init(jlStringObj);
     const array_ref = try Heap.Ref(Array).init(array);
     // TODO: Typecheck
